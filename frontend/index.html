@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Universal Web Scraper</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <div class="logo">
+      <span class="logo-icon">&#9889;</span>
+      <div>
+        <div class="logo-text">Universal Scraper</div>
+        <div class="logo-sub">14 engines &middot; unified report &middot; confidence scoring</div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="form-section" class="section">
+  <div class="container">
+
+    <div class="card url-card">
+      <div class="url-row">
+        <div class="url-input-wrap">
+          <span class="url-icon">&#127760;</span>
+          <input id="url-input" type="url" placeholder="https://example.com" autocomplete="off" spellcheck="false" />
+        </div>
+        <button id="scrape-btn" class="btn-primary">
+          <span id="btn-label">Scrape Now</span>
+          <span id="btn-spinner" class="spinner hidden" aria-hidden="true"></span>
+        </button>
+      </div>
+
+      <div class="mode-bar">
+        <label class="mode-chip">
+          <input type="radio" name="scrape-mode" value="multi" checked />
+          <span>&#128300; Multi-Engine (all 14 engines)</span>
+        </label>
+        <label class="mode-chip">
+          <input type="radio" name="scrape-mode" value="classic" />
+          <span>&#9889; Quick Scrape (v1)</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- MULTI-ENGINE CONFIG -->
+    <div id="multi-config" class="card config-card">
+      <div class="config-header">
+        <span class="config-title">&#128295; Engine Configuration</span>
+        <div class="config-actions">
+          <button class="btn-ghost" id="select-all-engines">Select All</button>
+          <button class="btn-ghost" id="deselect-all-engines">Deselect All</button>
+        </div>
+      </div>
+      <div class="engine-grid" id="engine-checkboxes"></div>
+      <div class="config-row">
+        <div class="config-item">
+          <label class="config-label">Crawl Depth</label>
+          <select id="crawl-depth">
+            <option value="1" selected>1 page (seed only)</option>
+            <option value="2">2 levels deep</option>
+            <option value="3">3 levels deep</option>
+          </select>
+        </div>
+        <div class="config-item">
+          <label class="config-label">Timeout per engine</label>
+          <select id="engine-timeout">
+            <option value="15">15s (fast)</option>
+            <option value="30" selected>30s (normal)</option>
+            <option value="60">60s (thorough)</option>
+            <option value="120">120s (max)</option>
+          </select>
+        </div>
+        <div class="config-item">
+          <label class="config-label toggle-label">
+            <span>Respect robots.txt</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="v2-respect-robots" checked />
+              <span class="toggle-thumb"></span>
+            </label>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- CLASSIC CONFIG -->
+    <div id="classic-config" class="card config-card hidden">
+      <div class="chip-group">
+        <label class="chip"><input type="checkbox" name="option" value="title" checked /><span>Title</span></label>
+        <label class="chip"><input type="checkbox" name="option" value="meta" checked /><span>Meta</span></label>
+        <label class="chip"><input type="checkbox" name="option" value="headings" checked /><span>Headings</span></label>
+        <label class="chip"><input type="checkbox" name="option" value="paragraphs" checked /><span>Paragraphs</span></label>
+        <label class="chip"><input type="checkbox" name="option" value="links" checked /><span>Links</span></label>
+        <label class="chip"><input type="checkbox" name="option" value="images" checked /><span>Images</span></label>
+        <label class="chip"><input type="checkbox" name="option" value="tables" /><span>Tables</span></label>
+        <label class="chip"><input type="checkbox" name="option" value="lists" /><span>Lists</span></label>
+        <label class="chip"><input type="checkbox" name="option" value="forms" /><span>Forms</span></label>
+        <label class="chip"><input type="checkbox" name="option" value="custom_css" /><span>CSS Selector</span></label>
+        <label class="chip"><input type="checkbox" name="option" value="custom_xpath" /><span>XPath</span></label>
+      </div>
+      <div class="selector-rows">
+        <div id="css-selector-row" class="selector-row hidden">
+          <input type="text" id="css-input" placeholder="CSS selector e.g. .article h2" />
+        </div>
+        <div id="xpath-selector-row" class="selector-row hidden">
+          <input type="text" id="xpath-input" placeholder="XPath e.g. //article//p" />
+        </div>
+      </div>
+      <div class="config-row">
+        <div class="config-item">
+          <label class="config-label toggle-label">
+            <span>Force Playwright</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="force-dynamic" />
+              <span class="toggle-thumb"></span>
+            </label>
+          </label>
+        </div>
+        <div class="config-item">
+          <label class="config-label toggle-label">
+            <span>Respect robots.txt</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="v1-respect-robots" checked />
+              <span class="toggle-thumb"></span>
+            </label>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div id="error-banner" class="error-banner hidden" role="alert"></div>
+  </div>
+</section>
+
+<section id="result-section" class="section hidden">
+  <div class="container">
+
+    <div id="summary-bar" class="summary-bar hidden">
+      <div class="summary-badges" id="result-badges"></div>
+      <div class="summary-actions">
+        <button id="view-html-btn" class="btn-secondary hidden">&#128196; HTML Report</button>
+        <button id="copy-btn" class="btn-secondary">&#128203; Copy JSON</button>
+        <button id="download-btn" class="btn-secondary">&#11015; Download JSON</button>
+      </div>
+    </div>
+
+    <div id="confidence-panel" class="card hidden">
+      <div class="conf-header">
+        <div>
+          <div class="conf-score" id="conf-score-val">-</div>
+          <div class="conf-label">Overall Confidence Score</div>
+        </div>
+        <div class="conf-meta" id="conf-meta"></div>
+      </div>
+      <div class="conf-bar-outer">
+        <div class="conf-bar-inner" id="conf-bar-fill"></div>
+      </div>
+      <div id="engine-table-wrap" class="engine-table-wrap"></div>
+    </div>
+
+    <div class="card output-card">
+      <div class="output-header">
+        <span class="output-title" id="output-label">Result</span>
+      </div>
+      <pre id="json-output" class="json-output" aria-label="JSON output"></pre>
+    </div>
+
+  </div>
+</section>
+
+<footer class="site-footer">
+  <p>Respect each site's Terms of Service and robots.txt. Never scrape private content without permission.</p>
+  <p style="margin-top:.35rem">
+    <a href="/robots.txt" target="_blank">robots.txt</a> &middot;
+    <a href="/docs" target="_blank">API Docs</a> &middot;
+    v3.0
+  </p>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>

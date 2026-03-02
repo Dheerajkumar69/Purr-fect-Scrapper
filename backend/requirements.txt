@@ -1,0 +1,85 @@
+# Backend dependencies for Universal Website Scraper
+# Install with: pip install -r requirements.txt
+# Install Playwright browsers: playwright install chromium
+
+# ---------------------------------------------------------------------------
+# Web framework
+# ---------------------------------------------------------------------------
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# ---------------------------------------------------------------------------
+# HTTP clients & HTML parsing
+# ---------------------------------------------------------------------------
+requests==2.32.3
+httpx[http2]>=0.28.1      # Async HTTP client (Engine B + test client)
+beautifulsoup4==4.12.3
+lxml==5.3.0
+html5lib>=1.1             # Permissive HTML5 parser (Engine C fallback)
+chardet==5.2.0
+brotli>=1.0.9             # Brotli (br) Content-Encoding decompression
+
+# ---------------------------------------------------------------------------
+# Dynamic / headless scraping
+# ---------------------------------------------------------------------------
+playwright==1.49.0
+playwright-stealth>=2.0.0 # Anti-bot fingerprint evasion for Playwright
+
+# ---------------------------------------------------------------------------
+# Structured metadata extraction (JSON-LD, schema.org, OpenGraph, microdata)
+# ---------------------------------------------------------------------------
+extruct>=0.17.0
+w3lib>=2.2.0              # URL / HTML helper utilities used by extruct
+
+# ---------------------------------------------------------------------------
+# File & data-source scraping
+# ---------------------------------------------------------------------------
+pdfplumber>=0.11.0        # PDF text + table extraction
+pandas>=2.2.0             # CSV / Excel parsing
+openpyxl>=3.1.0           # Excel (.xlsx) support for pandas
+xmltodict>=0.13.0         # XML / RSS / Atom feed parsing
+
+# ---------------------------------------------------------------------------
+# Search indexing
+# ---------------------------------------------------------------------------
+whoosh>=2.7.4             # Pure-Python full-text search index
+
+# ---------------------------------------------------------------------------
+# Visual / OCR scraping
+# ---------------------------------------------------------------------------
+pillow>=10.3.0            # Image processing
+pytesseract>=0.3.10       # Tesseract OCR Python wrapper
+opencv-python-headless>=4.9.0.80  # Headless OpenCV (no GUI)
+
+# ---------------------------------------------------------------------------
+# Report generation
+# ---------------------------------------------------------------------------
+jinja2>=3.1.4             # HTML report templating
+aiofiles>=23.2.1          # Async file I/O
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+slowapi>=0.1.9             # Per-IP rate limiting middleware for FastAPI
+
+# ---------------------------------------------------------------------------
+# Async job streaming (SSE)
+# ---------------------------------------------------------------------------
+sse-starlette>=2.1.0      # Server-Sent Events for FastAPI
+
+# ---------------------------------------------------------------------------
+# Graph / crawl map export
+# ---------------------------------------------------------------------------
+networkx>=3.3             # Build and export GraphML crawl maps
+
+# ---------------------------------------------------------------------------
+# Data validation & utilities
+# ---------------------------------------------------------------------------
+pydantic==2.10.2
+python-multipart>=0.0.9   # Multipart form support (file uploads)
+
+# ---------------------------------------------------------------------------
+# Testing
+# ---------------------------------------------------------------------------
+pytest==8.3.4
+pytest-asyncio==0.24.0

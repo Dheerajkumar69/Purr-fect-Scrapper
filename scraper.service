@@ -1,0 +1,55 @@
+# systemd unit for UniversalScraper — place at:
+#   /etc/systemd/system/scraper.service
+#
+# Install:
+#   sudo cp scraper.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now scraper
+#
+# Logs:
+#   journalctl -u scraper -f
+
+[Unit]
+Description=UniversalScraper FastAPI service
+Documentation=https://github.com/your-org/scraper
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dheeraj
+Group=dheeraj
+WorkingDirectory=/home/dheeraj/Code/databaselab/scrapperproject
+
+# Load optional environment overrides
+EnvironmentFile=-/home/dheeraj/Code/databaselab/scrapperproject/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=LOG_LEVEL=INFO
+
+ExecStart=/home/dheeraj/Code/databaselab/scrapperproject/run.sh
+
+# Restart policy — crash recovery with back-off
+Restart=on-failure
+RestartSec=10s
+StartLimitInterval=120s
+StartLimitBurst=5
+
+# Resource limits
+LimitNOFILE=65536
+# Prevent OOM killer from targeting this process first
+OOMScoreAdjust=-500
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/dheeraj/Code/databaselab/scrapperproject/output \
+               /home/dheeraj/Code/databaselab/scrapperproject/backend/__pycache__
+
+# Watchdog — systemd will restart if the service stops responding
+# (requires the app to call sd_notify; comment out if not using sd_notify)
+# WatchdogSec=60s
+
+[Install]
+WantedBy=multi-user.target

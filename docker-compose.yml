@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: universalscraper:latest
+    container_name: scraper
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./output:/app/output        # persistent reports, raw captures, logs
+      - ./backend:/app/backend      # live-reload source (dev only — remove for prod)
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      # Proxy pool: comma-separated proxy URLs (optional)
+      # - SCRAPER_PROXIES=http://user:pass@proxy1:8080,http://proxy2:8080
+      # AI engine toggle
+      # - AI_SCRAPER_ENABLED=0
+      # Confidence gate threshold (0–1); trigger JS re-scrape below this value
+      # - CONFIDENCE_RESCRAPE_THRESHOLD=0.35
+    env_file:
+      - .env                        # override any of the above with a local .env file
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Optional: lightweight reverse proxy for TLS termination in production
+  # nginx:
+  #   image: nginx:stable-alpine
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+  #     - ./certs:/etc/nginx/certs:ro
+  #   depends_on:
+  #     - scraper
+
+volumes:
+  output:
