@@ -1,6 +1,96 @@
 version: "3.9"
 
 services:
+  # ---------------------------------------------------------------------------
+  # Redis — job queue broker for Celery workers
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: scraper_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Celery worker — handles heavy scrape jobs asynchronously
+  # ---------------------------------------------------------------------------
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: universalscraper:latest
+    container_name: scraper_celery
+    restart: unless-stopped
+    command: >
+      sh -c "cd /app/backend && celery -A celery_app worker
+             --loglevel=info --concurrency=4
+             --queues=scrape --hostname=worker@%h"
+    volumes:
+      - ./output:/app/output
+      - ./backend:/app/backend
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - SCRAPER_OUTPUT_DIR=/app/output
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "celery", "-A", "celery_app", "inspect", "ping", "-d", "worker@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Celery Beat — periodic task scheduler (domain-profile cleanup, stale jobs)
+  # ---------------------------------------------------------------------------
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: universalscraper:latest
+    container_name: scraper_beat
+    restart: unless-stopped
+    command: >
+      sh -c "cd /app/backend && celery -A celery_app beat
+             --loglevel=info"
+    volumes:
+      - ./output:/app/output
+      - ./backend:/app/backend
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - SCRAPER_OUTPUT_DIR=/app/output
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
   scraper:
     build:
       context: .
@@ -16,6 +106,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - SCRAPER_OUTPUT_DIR=/app/output
       # Proxy pool: comma-separated proxy URLs (optional)
       # - SCRAPER_PROXIES=http://user:pass@proxy1:8080,http://proxy2:8080
       # AI engine toggle
@@ -24,8 +117,11 @@ services:
       # - CONFIDENCE_RESCRAPE_THRESHOLD=0.35
     env_file:
       - .env                        # override any of the above with a local .env file
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -51,3 +147,4 @@ services:
 
 volumes:
   output:
+  redis_data:

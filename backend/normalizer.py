@@ -120,6 +120,7 @@ UNIFIED_SCHEMA_KEYS = [
     "semantic_zones", "entities", "content_hash",
     "extraction_method", "engine_id", "confidence_score",
     "field_confidence", "confidence_breakdown",
+    "leaked_secrets", "secret_scan_summary",
 ]
 
 # ---------------------------------------------------------------------------
@@ -329,6 +330,41 @@ def normalize(engine_result: "Any") -> dict:
                 "payload_keys": ep.get("payload_keys", []),
             })
 
+    # ---- ENDPOINT PROBE RESULTS ----
+    detected_endpoints: list[dict] = []
+    endpoint_probe_summary: dict = {}
+    if r.engine_id == "endpoint_probe":
+        detected_endpoints = d.get("endpoints", [])
+        endpoint_probe_summary = {
+            k: d.get(k)
+            for k in (
+                "openapi_discovered", "openapi_url", "openapi_spec_summary",
+                "graphql_discovered", "graphql_url", "graphql_types",
+                "websocket_endpoints", "source_maps_found",
+                "total_endpoints_found", "unique_paths", "risk_summary",
+                "cors_exposed_count", "js_files_analyzed", "header_notes",
+            )
+        }
+
+    # ---- SECRET SCAN RESULTS ----
+    # Pass-through findings from the secret_scan engine (list of finding dicts).
+    # Any engine may emit leaked_secrets (e.g., static engines finding creds in HTML).
+    leaked_secrets: list[dict] = d.get("leaked_secrets") or []
+    secret_scan_summary: dict = {}
+    if r.engine_id == "secret_scan":
+        secret_scan_summary = d.get("secret_scan_summary") or {}
+
+    # ---- CRAWL DISCOVERY RESULTS ----
+    # pages / internal_links / external_links are only set by crawl_discovery.
+    # They are passed through verbatim — no normalisation needed.
+    pages: list[dict] = []
+    internal_links: list = []
+    external_links: list = []
+    if r.engine_id == "crawl_discovery":
+        pages          = d.get("pages", [])
+        internal_links = d.get("internal_links", [])
+        external_links = d.get("external_links", [])
+
     # ---- META TAGS ----
     # Already normalised to a dict above as _meta_dict
     meta_tags: dict = _meta_dict
@@ -406,6 +442,13 @@ def normalize(engine_result: "Any") -> dict:
         "lists": lists[:50],
         "structured_data": structured_data,
         "detected_api_data": detected_api_data,
+        "detected_endpoints": detected_endpoints,
+        "endpoint_probe_summary": endpoint_probe_summary,
+        "leaked_secrets": leaked_secrets,
+        "secret_scan_summary": secret_scan_summary,
+        "pages": pages,
+        "internal_links": internal_links,
+        "external_links": external_links,
         "meta_tags": meta_tags,
         "keywords": keywords[:50],
         "canonical_url": canonical_url,

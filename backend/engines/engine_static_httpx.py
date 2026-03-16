@@ -16,7 +16,6 @@ import os
 import sys
 import time
 from typing import TYPE_CHECKING
-from urllib.parse import urljoin
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
@@ -75,31 +74,42 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
         except Exception:
             soup = BeautifulSoup(html, "lxml")
 
+        # Use production parser functions for full extraction (consistent with static_requests)
+        from parser import (
+            parse_headings, parse_images as _parse_images,
+            parse_links as _parse_links, parse_forms,
+            parse_json_ld, parse_opengraph, parse_semantic_zones,
+            parse_main_content,
+        )
+        from normalizer import _detect_language_from_html
+
         title_tag = soup.find("title")
         title_text = title_tag.get_text(strip=True) if title_tag else ""
 
-        headings = []
-        for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
-            t = " ".join(tag.get_text().split())
-            if t:
-                headings.append({"level": int(tag.name[1]), "text": t})
-
+        headings = parse_headings(soup)
         paragraphs = [" ".join(p.get_text().split()) for p in soup.find_all("p")
                       if p.get_text(strip=True)]
+        links = _parse_links(soup, str(resp.url))
+        images = _parse_images(soup, str(resp.url))
+        forms = parse_forms(soup)
+        json_ld = parse_json_ld(soup)
+        opengraph = parse_opengraph(soup)
+        semantic_zones = parse_semantic_zones(soup, str(resp.url))
+        language = _detect_language_from_html(html[:4096])
+        main_content = parse_main_content(soup)
 
-        links = []
-        seen: set[str] = set()
-        for a in soup.find_all("a", href=True):
-            href = str(a["href"]).strip()
-            if href.startswith(("#", "javascript:", "mailto:", "tel:")):
-                continue
-            full = urljoin(str(resp.url), href)
-            if full not in seen:
-                seen.add(full)
-                links.append({"text": " ".join(a.get_text().split()), "href": full})
+        meta_tags = []
+        for tag in soup.find_all("meta"):
+            entry: dict = {}
+            for attr in ("name", "property", "http-equiv", "charset", "content"):
+                val = tag.get(attr)
+                if val:
+                    entry[attr] = str(val)
+            if entry:
+                meta_tags.append(entry)
 
         body = soup.find("body")
-        plain_text = " ".join(body.get_text().split()) if body else ""
+        plain_text = main_content or (" ".join(body.get_text().split()) if body else "")
 
         return EngineResult(
             engine_id=engine_id, engine_name=engine_name, url=url,
@@ -109,7 +119,11 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
             content_type=ct,
             elapsed_s=time.time() - start,
             data={"title": title_text, "headings": headings,
-                  "paragraphs": paragraphs, "links": links},
+                  "paragraphs": paragraphs, "links": links,
+                  "images": images, "forms": forms,
+                  "json_ld": json_ld, "opengraph": opengraph,
+                  "semantic_zones": semantic_zones, "language": language,
+                  "meta_tags": meta_tags},
         )
 
     except Exception as exc:

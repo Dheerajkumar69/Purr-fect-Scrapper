@@ -86,7 +86,6 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
         try:
             from whoosh import index as whoosh_index
             from whoosh.fields import Schema, TEXT, ID, STORED, NUMERIC
-            from whoosh.qparser import MultifieldParser
             from whoosh.analysis import StemmingAnalyzer
 
             schema = Schema(

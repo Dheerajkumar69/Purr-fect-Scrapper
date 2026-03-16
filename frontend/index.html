@@ -17,12 +17,13 @@
       <span class="logo-icon">&#9889;</span>
       <div>
         <div class="logo-text">Universal Scraper</div>
-        <div class="logo-sub">14 engines &middot; unified report &middot; confidence scoring</div>
+        <div class="logo-sub">16 engines &middot; credential scanner &middot; full-site crawl &middot; confidence scoring</div>
       </div>
     </div>
   </div>
 </header>
 
+<!-- ── FORM SECTION ──────────────────────────────────────── -->
 <section id="form-section" class="section">
   <div class="container">
 
@@ -41,7 +42,7 @@
       <div class="mode-bar">
         <label class="mode-chip">
           <input type="radio" name="scrape-mode" value="multi" checked />
-          <span>&#128300; Multi-Engine (all 14 engines)</span>
+          <span>&#128300; Multi-Engine (16 engines)</span>
         </label>
         <label class="mode-chip">
           <input type="radio" name="scrape-mode" value="classic" />
@@ -83,6 +84,15 @@
             <span>Respect robots.txt</span>
             <label class="toggle-switch">
               <input type="checkbox" id="v2-respect-robots" checked />
+              <span class="toggle-thumb"></span>
+            </label>
+          </label>
+        </div>
+        <div class="config-item">
+          <label class="config-label toggle-label">
+            <span>Full-site crawl (all pages)</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="v2-full-crawl" />
               <span class="toggle-thumb"></span>
             </label>
           </label>
@@ -139,9 +149,51 @@
   </div>
 </section>
 
+<!-- ── PROGRESS SECTION ──────────────────────────────────── -->
+<section id="progress-section" class="section hidden">
+  <div class="container">
+    <div class="card progress-card">
+
+      <div class="progress-header">
+        <div class="progress-title-row">
+          <span class="progress-icon spinning">&#9881;</span>
+          <span id="progress-phase-label" class="progress-phase">Initialising…</span>
+          <span id="progress-job-id" class="progress-job-id"></span>
+        </div>
+        <button id="cancel-job-btn" class="btn-ghost btn-danger-ghost" title="Cancel this job">&#10005; Cancel</button>
+      </div>
+
+      <div class="prog-bar-outer">
+        <div id="prog-bar-fill" class="prog-bar-fill" style="width:0%"></div>
+        <span id="prog-pct-label" class="prog-pct-label">0%</span>
+      </div>
+
+      <div id="phase-pipeline" class="phase-pipeline">
+        <div class="phase-step" data-phase="site_analysis">Site Analysis</div>
+        <div class="phase-step" data-phase="parallel_engines">Static Engines</div>
+        <div class="phase-step" data-phase="sequential_engines">Browser Engines</div>
+        <div class="phase-step" data-phase="normalize">Normalize</div>
+        <div class="phase-step" data-phase="merge">Merge</div>
+        <div class="phase-step" data-phase="reports">Reports</div>
+      </div>
+
+      <div id="engine-live-grid" class="engine-live-grid"></div>
+
+      <div class="live-log-header">
+        <span>&#128396;&nbsp;Live Log</span>
+        <span id="live-log-count" class="log-count">0 events</span>
+      </div>
+      <div id="live-log" class="live-log" aria-live="polite" aria-relevant="additions"></div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ── RESULT SECTION ────────────────────────────────────── -->
 <section id="result-section" class="section hidden">
   <div class="container">
 
+    <!-- Summary bar sits outside tabs -->
     <div id="summary-bar" class="summary-bar hidden">
       <div class="summary-badges" id="result-badges"></div>
       <div class="summary-actions">
@@ -151,25 +203,98 @@
       </div>
     </div>
 
-    <div id="confidence-panel" class="card hidden">
-      <div class="conf-header">
-        <div>
-          <div class="conf-score" id="conf-score-val">-</div>
-          <div class="conf-label">Overall Confidence Score</div>
-        </div>
-        <div class="conf-meta" id="conf-meta"></div>
-      </div>
-      <div class="conf-bar-outer">
-        <div class="conf-bar-inner" id="conf-bar-fill"></div>
-      </div>
-      <div id="engine-table-wrap" class="engine-table-wrap"></div>
+    <!-- ── Tab Bar ─────────────────────────────────────────── -->
+    <div class="tab-bar" id="result-tab-bar" role="tablist">
+      <button class="tab-btn active" data-tab="report"   role="tab" aria-selected="true">&#128200; Report</button>
+      <button class="tab-btn"        data-tab="security" role="tab" aria-selected="false">&#128274; Security <span id="security-badge" class="tab-badge hidden"></span></button>
+      <button class="tab-btn"        data-tab="crawlmap" role="tab" aria-selected="false">&#127758; Crawl Map <span id="crawl-badge"    class="tab-badge hidden"></span></button>
+      <button class="tab-btn"        data-tab="rawjson"  role="tab" aria-selected="false">&#128196; Raw JSON</button>
     </div>
 
-    <div class="card output-card">
-      <div class="output-header">
-        <span class="output-title" id="output-label">Result</span>
+    <!-- ── TAB: Report ─────────────────────────────────────── -->
+    <div id="tab-report" class="tab-pane active" role="tabpanel">
+      <div id="confidence-panel" class="card hidden">
+        <div class="conf-header">
+          <div>
+            <div class="conf-score" id="conf-score-val">-</div>
+            <div class="conf-label">Overall Confidence Score</div>
+          </div>
+          <div class="conf-meta" id="conf-meta"></div>
+        </div>
+        <div class="conf-bar-outer">
+          <div class="conf-bar-inner" id="conf-bar-fill"></div>
+        </div>
+        <div id="engine-table-wrap" class="engine-table-wrap"></div>
       </div>
-      <pre id="json-output" class="json-output" aria-label="JSON output"></pre>
+      <!-- Report summary fields -->
+      <div id="report-fields-panel" class="card hidden">
+        <div class="rp-header">&#128196; Extracted Data Summary</div>
+        <div id="report-fields-grid" class="rp-grid"></div>
+      </div>
+    </div>
+
+    <!-- ── TAB: Security ───────────────────────────────────── -->
+    <div id="tab-security" class="tab-pane hidden" role="tabpanel">
+
+      <!-- Endpoint probe panel -->
+      <div id="endpoint-panel" class="card hidden">
+        <div class="ep-header">
+          <h2 class="ep-title">&#128269; Exposed Endpoints &amp; APIs</h2>
+          <div id="ep-summary-badges" class="ep-summary-badges-ui"></div>
+        </div>
+        <div id="ep-filter-bar" class="ep-filter-bar-ui"></div>
+        <div id="ep-table-wrap" class="ep-table-wrap"></div>
+        <div class="ep-actions-row">
+          <button id="ep-copy-json-btn" class="btn-secondary">&#128203; Copy as JSON</button>
+          <button id="ep-download-csv-btn" class="btn-secondary">&#11015; Download CSV</button>
+        </div>
+      </div>
+
+      <!-- Secrets panel -->
+      <div id="secrets-panel" class="card hidden">
+        <div class="ep-header">
+          <h2 class="secrets-title">&#128272; Leaked Credentials &amp; Secrets</h2>
+          <div id="secrets-summary-badges" class="ep-summary-badges-ui"></div>
+        </div>
+        <div id="secrets-filter-bar" class="ep-filter-bar-ui"></div>
+        <div id="secrets-table-wrap" class="ep-table-wrap"></div>
+        <div class="ep-actions-row">
+          <button id="secrets-copy-json-btn" class="btn-secondary">&#128203; Copy as JSON</button>
+          <button id="secrets-download-csv-btn" class="btn-secondary">&#11015; Download CSV</button>
+        </div>
+      </div>
+
+      <!-- Shown only when security tab has nothing to display -->
+      <div id="security-empty" class="card empty-state hidden">
+        <span class="empty-icon">&#10003;</span>
+        <div class="empty-title">No security issues detected</div>
+        <div class="empty-sub">No exposed endpoints or leaked credentials were found on this page.</div>
+      </div>
+
+    </div>
+
+    <!-- ── TAB: Crawl Map ──────────────────────────────────── -->
+    <div id="tab-crawlmap" class="tab-pane hidden" role="tabpanel">
+      <div id="crawlmap-panel" class="card">
+        <div class="ep-header">
+          <h2 class="crawl-title">&#127758; Crawled Pages</h2>
+          <div id="crawl-summary-badges" class="ep-summary-badges-ui"></div>
+        </div>
+        <div id="crawl-search-row" class="crawl-search-row hidden">
+          <input type="text" id="crawl-search-input" class="config-input" placeholder="Filter pages by URL or title…" />
+        </div>
+        <div id="crawl-table-wrap" class="ep-table-wrap"></div>
+      </div>
+    </div>
+
+    <!-- ── TAB: Raw JSON ───────────────────────────────────── -->
+    <div id="tab-rawjson" class="tab-pane hidden" role="tabpanel">
+      <div class="card output-card">
+        <div class="output-header">
+          <span class="output-title" id="output-label">Result</span>
+        </div>
+        <pre id="json-output" class="json-output" aria-label="JSON output"></pre>
+      </div>
     </div>
 
   </div>
@@ -180,7 +305,7 @@
   <p style="margin-top:.35rem">
     <a href="/robots.txt" target="_blank">robots.txt</a> &middot;
     <a href="/docs" target="_blank">API Docs</a> &middot;
-    v3.0
+    v4.0
   </p>
 </footer>
 

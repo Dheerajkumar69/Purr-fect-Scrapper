@@ -140,6 +140,20 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
             username = creds.get("username", "")
             password = creds.get("password", "")
             if username and password:
+                # SSRF guard: validate login_url before letting Playwright navigate to it
+                from utils import validate_url as _validate_url
+                _url_ok, _url_reason = _validate_url(login_url)
+                if not _url_ok:
+                    warnings.append(
+                        f"login_url blocked by SSRF protection: {_url_reason}"
+                    )
+                    return EngineResult(
+                        engine_id=engine_id, engine_name=engine_name, url=url,
+                        success=False,
+                        error=f"login_url blocked: {_url_reason}",
+                        warnings=warnings,
+                        elapsed_s=time.time() - start,
+                    )
                 try:
                     cookies = await _login_playwright(login_url, username, password, context)
                     context.auth_cookies.update(cookies)
@@ -228,8 +242,6 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
 
 
 def run(url: str, context: "EngineContext") -> "EngineResult":
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(_run_async(url, context))
-    finally:
-        loop.close()
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+        return _pool.submit(asyncio.run, _run_async(url, context)).result()

@@ -10,10 +10,12 @@ Schema: domain_profiles
   domain          TEXT PRIMARY KEY
   best_engine     TEXT         — engine_id with highest success rate
   avg_load_ms     REAL         — rolling average page-load latency
+  recommended_timeout_s REAL   — adaptive per-domain timeout (avg_load_ms * 3, capped)
   failure_rate    REAL         — overall engine failure rate for this domain
   run_count       INT          — total jobs processed for this domain
   last_updated    TEXT         — ISO-8601
   engine_scores   TEXT         — JSON: {engine_id: {ok: int, fail: int, avg_ms: float}}
+  field_accuracy  TEXT         — JSON: {engine_id: {field: {ok: int, fail: int}}}
   notes           TEXT         — free-form flags, e.g. "requires_js,bot_protected"
 """
 
@@ -70,16 +72,27 @@ class DomainProfileStore:
         with self._conn() as con:
             con.execute("""
                 CREATE TABLE IF NOT EXISTS domain_profiles (
-                    domain        TEXT PRIMARY KEY,
-                    best_engine   TEXT,
-                    avg_load_ms   REAL NOT NULL DEFAULT 0.0,
-                    failure_rate  REAL NOT NULL DEFAULT 0.0,
-                    run_count     INTEGER NOT NULL DEFAULT 0,
-                    last_updated  TEXT NOT NULL,
-                    engine_scores TEXT NOT NULL DEFAULT '{}',
-                    notes         TEXT NOT NULL DEFAULT ''
+                    domain                TEXT PRIMARY KEY,
+                    best_engine           TEXT,
+                    avg_load_ms           REAL NOT NULL DEFAULT 0.0,
+                    recommended_timeout_s REAL NOT NULL DEFAULT 30.0,
+                    failure_rate          REAL NOT NULL DEFAULT 0.0,
+                    run_count             INTEGER NOT NULL DEFAULT 0,
+                    last_updated          TEXT NOT NULL,
+                    engine_scores         TEXT NOT NULL DEFAULT '{}',
+                    field_accuracy        TEXT NOT NULL DEFAULT '{}',
+                    notes                 TEXT NOT NULL DEFAULT ''
                 )
             """)
+            # Migrations for older schemas
+            for col, definition in [
+                ("recommended_timeout_s", "REAL NOT NULL DEFAULT 30.0"),
+                ("field_accuracy", "TEXT NOT NULL DEFAULT '{}'"),
+            ]:
+                try:
+                    con.execute(f"ALTER TABLE domain_profiles ADD COLUMN {col} {definition}")
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ reads
 
@@ -94,10 +107,12 @@ class DomainProfileStore:
                 "domain": domain,
                 "best_engine": None,
                 "avg_load_ms": 0.0,
+                "recommended_timeout_s": 30.0,
                 "failure_rate": 0.0,
                 "run_count": 0,
                 "last_updated": None,
                 "engine_scores": {},
+                "field_accuracy": {},
                 "notes": "",
             }
         d = dict(row)
@@ -105,6 +120,10 @@ class DomainProfileStore:
             d["engine_scores"] = json.loads(d["engine_scores"] or "{}")
         except Exception:
             d["engine_scores"] = {}
+        try:
+            d["field_accuracy"] = json.loads(d.get("field_accuracy") or "{}")
+        except Exception:
+            d["field_accuracy"] = {}
         return d
 
     def get_for_url(self, url: str) -> dict:
@@ -150,6 +169,78 @@ class DomainProfileStore:
                         engine_id, domain, fail_rate,
                     )
         return to_skip
+
+    # ----------------------------------------------------------------- adaptive timeout
+
+    def get_recommended_timeout(self, domain: str,
+                                 min_s: float = 10.0,
+                                 max_s: float = 120.0) -> float:
+        """
+        Compute an adaptive per-domain timeout from historical avg_load_ms.
+        Formula: max(min_s, min(avg_load_ms * 3 / 1000, max_s))
+        Returns min_s (default 10s) when no history exists.
+        """
+        profile = self.get(domain)
+        avg_ms = profile.get("avg_load_ms", 0.0)
+        if avg_ms <= 0:
+            return min(30.0, max_s)  # default 30s
+        computed = avg_ms * 3.0 / 1000.0  # 3× average load time in seconds
+        result = max(min_s, min(computed, max_s))
+        return round(result, 1)
+
+    def get_recommended_timeout_for_url(self, url: str) -> float:
+        return self.get_recommended_timeout(_domain_from_url(url))
+
+    # ----------------------------------------------------------------- per-field accuracy
+
+    def update_field_accuracy(
+        self,
+        domain: str,
+        engine_id: str,
+        field_scores: dict[str, bool],
+    ) -> None:
+        """
+        Record per-field extraction accuracy for an engine on a domain.
+
+        Parameters
+        ----------
+        engine_id : str
+        field_scores : dict[field_name, was_successful]
+            e.g. {"title": True, "main_content": False}
+        """
+        profile = self.get(domain)
+        fa: dict = profile.get("field_accuracy") or {}
+        eng = fa.setdefault(engine_id, {})
+        for field, ok in field_scores.items():
+            stats = eng.setdefault(field, {"ok": 0, "fail": 0})
+            if ok:
+                stats["ok"] += 1
+            else:
+                stats["fail"] += 1
+        self._upsert_profile(domain, profile.get("engine_scores", {}),
+                             profile, field_accuracy=fa)
+
+    def get_best_engine_for_field(self, domain: str, field: str) -> Optional[str]:
+        """
+        Return the engine_id with the highest per-field success rate for
+        a given domain+field combination, or None if not enough data.
+        """
+        profile = self.get(domain)
+        fa: dict = profile.get("field_accuracy") or {}
+        if not fa:
+            return None
+        best_engine = None
+        best_rate = 0.0
+        for engine_id, fields in fa.items():
+            stats = fields.get(field, {})
+            total = stats.get("ok", 0) + stats.get("fail", 0)
+            if total < 2:  # need at least 2 observations
+                continue
+            rate = stats.get("ok", 0) / total
+            if rate > best_rate:
+                best_rate = rate
+                best_engine = engine_id
+        return best_engine
 
     # ------------------------------------------------------------------ writes
 
@@ -219,6 +310,12 @@ class DomainProfileStore:
         profile["failure_rate"] = 1.0 - (total_ok / total) if total else 0.0
         profile["avg_load_ms"] = sum(all_ms) / len(all_ms) if all_ms else 0.0
 
+        # Adaptive timeout: 3× average load time, capped at 120s
+        avg_ms = profile["avg_load_ms"]
+        if avg_ms > 0:
+            computed_timeout = max(10.0, min(avg_ms * 3.0 / 1000.0, 120.0))
+            profile["recommended_timeout_s"] = round(computed_timeout, 1)
+
         # best engine = highest success rate with at least 1 success
         def _rate(info):
             t = info["ok"] + info["fail"]
@@ -229,30 +326,38 @@ class DomainProfileStore:
 
         self._upsert_profile(domain, scores, profile)
 
-    def _upsert_profile(self, domain: str, scores: dict, profile: Optional[dict] = None) -> None:
+    def _upsert_profile(self, domain: str, scores: dict,
+                         profile: Optional[dict] = None,
+                         field_accuracy: Optional[dict] = None) -> None:
         existing = profile or self.get(domain)
+        fa = field_accuracy if field_accuracy is not None else existing.get("field_accuracy", {})
         with self._conn() as con:
             con.execute("""
                 INSERT INTO domain_profiles
-                    (domain, best_engine, avg_load_ms, failure_rate, run_count,
-                     last_updated, engine_scores, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (domain, best_engine, avg_load_ms, recommended_timeout_s,
+                     failure_rate, run_count, last_updated, engine_scores,
+                     field_accuracy, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(domain) DO UPDATE SET
-                    best_engine   = excluded.best_engine,
-                    avg_load_ms   = excluded.avg_load_ms,
-                    failure_rate  = excluded.failure_rate,
-                    run_count     = excluded.run_count,
-                    last_updated  = excluded.last_updated,
-                    engine_scores = excluded.engine_scores,
-                    notes         = excluded.notes
+                    best_engine           = excluded.best_engine,
+                    avg_load_ms           = excluded.avg_load_ms,
+                    recommended_timeout_s = excluded.recommended_timeout_s,
+                    failure_rate          = excluded.failure_rate,
+                    run_count             = excluded.run_count,
+                    last_updated          = excluded.last_updated,
+                    engine_scores         = excluded.engine_scores,
+                    field_accuracy        = excluded.field_accuracy,
+                    notes                 = excluded.notes
             """, (
                 domain,
                 existing.get("best_engine"),
                 existing.get("avg_load_ms", 0.0),
+                existing.get("recommended_timeout_s", 30.0),
                 existing.get("failure_rate", 0.0),
                 existing.get("run_count", 0),
                 _now(),
                 json.dumps(scores),
+                json.dumps(fa),
                 existing.get("notes", ""),
             ))
 

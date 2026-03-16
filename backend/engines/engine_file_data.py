@@ -82,14 +82,15 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
         resp.raise_for_status()
 
         ct = resp.headers.get("Content-Type", "")
-        raw_bytes = b""
+        chunks: list[bytes] = []
         downloaded = 0
         for chunk in resp.iter_content(chunk_size=65536):
             downloaded += len(chunk)
             if downloaded > _MAX_BYTES:
                 warnings.append(f"File truncated at {_MAX_BYTES // 1024 // 1024} MB")
                 break
-            raw_bytes += chunk
+            chunks.append(chunk)
+        raw_bytes = b"".join(chunks)
 
         file_type = _detect_file_type(url, ct, raw_bytes[:8])
 

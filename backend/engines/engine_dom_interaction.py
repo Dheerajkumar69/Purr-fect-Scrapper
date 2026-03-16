@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sqlite3
 import sys
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
@@ -24,6 +26,82 @@ if TYPE_CHECKING:
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Self-healing selector store — persists per-domain selector hit/miss stats.
+# A selector is declared "dead" for a domain after _DEAD_THRESHOLD consecutive
+# zero-match runs and is silently skipped on future visits.
+# ---------------------------------------------------------------------------
+_DEAD_THRESHOLD = 3  # consecutive zero-match runs before a selector is marked dead
+
+
+class _SelectorHitStore:
+    """Tiny SQLite-backed store that tracks pagination selector performance per domain."""
+
+    def __init__(self, db_path: str) -> None:
+        self._db = db_path
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        with self._conn() as con:
+            con.execute(
+                """CREATE TABLE IF NOT EXISTS selector_hits (
+                    domain TEXT NOT NULL,
+                    selector TEXT NOT NULL,
+                    hit_count INTEGER NOT NULL DEFAULT 0,
+                    miss_streak INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (domain, selector)
+                )"""
+            )
+
+    def _conn(self):
+        con = sqlite3.connect(self._db, timeout=5)
+        con.execute("PRAGMA journal_mode=WAL")
+        return con
+
+    def is_dead(self, domain: str, selector: str) -> bool:
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT miss_streak FROM selector_hits WHERE domain=? AND selector=?",
+                (domain, selector),
+            ).fetchone()
+        return bool(row and row[0] >= _DEAD_THRESHOLD)
+
+    def record_hit(self, domain: str, selector: str) -> None:
+        with self._conn() as con:
+            con.execute(
+                """INSERT INTO selector_hits (domain, selector, hit_count, miss_streak)
+                   VALUES (?, ?, 1, 0)
+                   ON CONFLICT(domain, selector) DO UPDATE SET
+                       hit_count = hit_count + 1,
+                       miss_streak = 0""",
+                (domain, selector),
+            )
+
+    def record_miss(self, domain: str, selector: str) -> None:
+        with self._conn() as con:
+            con.execute(
+                """INSERT INTO selector_hits (domain, selector, hit_count, miss_streak)
+                   VALUES (?, ?, 0, 1)
+                   ON CONFLICT(domain, selector) DO UPDATE SET
+                       miss_streak = miss_streak + 1""",
+                (domain, selector),
+            )
+
+    def stats(self, domain: str) -> dict:
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT selector, hit_count, miss_streak FROM selector_hits WHERE domain=?",
+                (domain,),
+            ).fetchall()
+        return {r[0]: {"hits": r[1], "miss_streak": r[2]} for r in rows}
+
+
+def _get_selector_store(output_dir: str | None = None) -> "_SelectorHitStore | None":
+    try:
+        base = output_dir or os.environ.get("SCRAPER_OUTPUT_DIR", "/tmp/scraper_output")
+        return _SelectorHitStore(os.path.join(base, "selector_hits.sqlite"))
+    except Exception as _e:
+        logger.debug("SelectorHitStore unavailable: %s", _e)
+        return None
 
 
 async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
@@ -35,6 +113,10 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
     start = time.time()
     engine_id = "dom_interaction"
     engine_name = "DOM Interaction Automation (Playwright scroll/paginate)"
+
+    # Self-healing selector store
+    _domain = urlparse(url).netloc
+    _sel_store = _get_selector_store(getattr(context, "raw_output_dir", None))
 
     try:
         from playwright.async_api import async_playwright, TimeoutError as PWTimeout
@@ -59,7 +141,6 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                     java_script_enabled=True,
                 )
                 if context.auth_cookies:
-                    from urllib.parse import urlparse
                     parsed = urlparse(url)
                     cookie_list = [
                         {"name": k, "value": v, "domain": parsed.hostname or "", "path": "/"}
@@ -121,7 +202,15 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                     "a[rel='next']", ".next a", ".load-more",
                     "button:has-text('View more')", "a:has-text('View all')",
                 ]
+                _clicked_pagination = False
                 for sel in pagination_selectors:
+                    # Self-healing: skip selectors with ≥_DEAD_THRESHOLD consecutive misses
+                    if _sel_store and _sel_store.is_dead(_domain, sel):
+                        logger.debug(
+                            "[%s] Skipping dead selector '%s' on %s",
+                            context.job_id, sel, _domain,
+                        )
+                        continue
                     try:
                         btn = await page.wait_for_selector(sel, state="visible", timeout=1500)
                         if btn:
@@ -131,9 +220,23 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                             await page.wait_for_load_state("networkidle", timeout=5000)
                             collected_html_snapshots.append(await page.content())
                             logger.debug("[%s] Clicked pagination: %s", context.job_id, sel)
+                            # Record a hit — resets miss streak
+                            if _sel_store:
+                                _sel_store.record_hit(_domain, sel)
+                            _clicked_pagination = True
                             break
+                        else:
+                            if _sel_store:
+                                _sel_store.record_miss(_domain, sel)
                     except Exception:
-                        pass
+                        # Selector did not match / timed out → record miss
+                        if _sel_store:
+                            _sel_store.record_miss(_domain, sel)
+
+                if not _clicked_pagination:
+                    logger.debug(
+                        "[%s] No pagination selector matched on %s", context.job_id, _domain
+                    )
 
                 # 4. Open visible dropdowns / accordions
                 expand_selectors = [
@@ -220,6 +323,7 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                 "semantic_zones": semantic_zones,
                 "language": language,
                 "interaction_snapshots": len(collected_html_snapshots),
+                "selector_stats": (_sel_store.stats(_domain) if _sel_store else {}),
             },
         )
 
@@ -232,8 +336,6 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
 
 
 def run(url: str, context: "EngineContext") -> "EngineResult":
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(_run_async(url, context))
-    finally:
-        loop.close()
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+        return _pool.submit(asyncio.run, _run_async(url, context)).result()

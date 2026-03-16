@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -32,6 +33,54 @@ sys.path.insert(0, os.path.dirname(__file__))
 from engines import EngineContext, EngineResult, ENGINE_IDS
 from normalizer import normalize
 from merger import merge
+
+# New modules
+try:
+    from telemetry import PhaseTimeline, record_job_completed, network_payloads_to_har, make_job_file_logger
+except ImportError:
+    PhaseTimeline = None  # type: ignore[assignment,misc]
+    def record_job_completed(*a, **kw): pass
+    def network_payloads_to_har(*a, **kw): return ""
+    def make_job_file_logger(log_path, job_id): return logging.FileHandler(log_path)
+
+# Module-level registry of active per-job log handlers.
+# Allows any caller (including main.py's _run_job finally-block) to safely
+# remove and close a handler even when an exception escapes Orchestrator.run().
+_active_job_handlers: dict[str, tuple[logging.Logger, logging.Handler]] = {}
+_active_job_handlers_lock = threading.Lock()
+
+
+def _cleanup_job_log_handler(job_id: str) -> None:
+    """
+    Remove and close the per-job file handler associated with *job_id*.
+    Idempotent — safe to call multiple times or for a job whose handler was
+    already cleaned up in the normal completion path.
+    """
+    with _active_job_handlers_lock:
+        entry = _active_job_handlers.pop(job_id, None)
+    if entry is not None:
+        lgr, hdlr = entry
+        lgr.removeHandler(hdlr)
+        try:
+            hdlr.close()
+        except Exception:
+            pass
+
+try:
+    from quality import annotate_quality
+except ImportError:
+    def annotate_quality(doc, raw_html=""): return doc  # type: ignore[misc]
+
+try:
+    from audit_log import AuditLog, build_decisions_from_merge
+except ImportError:
+    AuditLog = None  # type: ignore[assignment]
+    def build_decisions_from_merge(*a, **kw): return []  # type: ignore[misc]
+
+try:
+    from history_store import HistoryStore
+except ImportError:
+    HistoryStore = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +308,8 @@ class EngineSelector:
         "static_urllib",
         "structured_metadata",
         "search_index",
+        "endpoint_probe",
+        "secret_scan",
     ]
 
     # Engines for JS-heavy / SPA sites
@@ -313,6 +364,12 @@ class EngineSelector:
 
         # Extended engines (crawl, OCR, hybrid)
         selected.extend(self._EXTENDED)
+
+        # In multi-engine mode, skip hybrid if individual browser engines are
+        # already selected — hybrid re-runs them internally and wastes resources.
+        _browser_engines_present = {"headless_playwright", "dom_interaction", "visual_ocr"}
+        if _browser_engines_present & set(selected):
+            selected = [e for e in selected if e != "hybrid"]
 
         # Auth engine
         if context.credentials or context.auth_cookies:
@@ -394,14 +451,15 @@ class Orchestrator:
         timeout_per_engine: int = 30,
         job_id: Optional[str] = None,
         progress_callback: Optional[Any] = None,
-    ) -> JobResult:
+        full_crawl_mode: bool = False,
+    ) -> "JobResult":
         """
         Run the full scraping pipeline against *url*.
 
         Returns a JobResult with all raw outputs, normalized outputs,
         merged document, and paths to saved reports.
         """
-        job_id = job_id or str(uuid.uuid4())[:8]
+        job_id = job_id or uuid.uuid4().hex
         job_start = time.time()
 
         raw_output_dir = os.path.join(self.output_dir, "raw", job_id)
@@ -410,13 +468,21 @@ class Orchestrator:
         log_path = os.path.join(self.output_dir, "logs", f"{job_id}.log")
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
-        # Per-job file logger
-        file_handler = logging.FileHandler(log_path)
-        file_handler.setFormatter(logging.Formatter(
-            "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-        ))
-        root_logger = logging.getLogger()
-        root_logger.addHandler(file_handler)
+        # Per-job structured JSON file logger.
+        # IMPORTANT: attach to a *named child logger* (not the root logger) so
+        # that concurrent jobs don't write each other's messages into the wrong
+        # log file (BUG-08 / BUG-13).
+        file_handler = make_job_file_logger(log_path, job_id)
+        job_logger = logging.getLogger(f"scraper.job.{job_id}")
+        job_logger.addHandler(file_handler)
+        job_logger.propagate = True   # still bubbles to console/root handlers
+        # Register so any outer finally-block (e.g. main.py's _run_job) can
+        # clean up the handler even if an exception escapes this method.
+        with _active_job_handlers_lock:
+            _active_job_handlers[job_id] = (job_logger, file_handler)
+
+        # High-resolution phase timeline
+        timeline = PhaseTimeline(job_id) if PhaseTimeline else None
 
         logger.info("[%s] ===== JOB START: %s =====", job_id, url)
 
@@ -431,27 +497,41 @@ class Orchestrator:
         _emit("starting", 0.0)
 
         # --- 0. Domain Profile (adaptive learning) ---
-        from domain_profile import DomainProfileStore as _DPStore
+        from domain_profile import DomainProfileStore as _DPStore, _domain_from_url as _dp_domain
         _dp_path = os.path.join(self.output_dir, "domain_profiles.sqlite")
         _dp_store = _DPStore(_dp_path)
-        _domain_skips = _dp_store.get_engines_to_skip(url)
+        _dp_domain_str = _dp_domain(url)
+        _domain_skips = _dp_store.get_engines_to_skip(_dp_domain_str)
         if _domain_skips:
             logger.info("[%s] DomainProfile: skipping chronic-failure engines: %s",
                         job_id, _domain_skips)
-        _domain_preferred = _dp_store.get_preferred_engines(url)
+        _domain_preferred = _dp_store.get_preferred_engines(_dp_domain_str)
         if _domain_preferred:
             logger.info("[%s] DomainProfile: preferred engines from history: %s",
                         job_id, _domain_preferred)
 
+        # Adaptive timeout: use domain profile history to set per-domain timeout
+        _adaptive_timeout = _dp_store.get_recommended_timeout_for_url(url)
+        if _adaptive_timeout != timeout_per_engine:
+            logger.info("[%s] AdaptiveTimeout: domain recommended %.1fs (user: %ds)",
+                        job_id, _adaptive_timeout, timeout_per_engine)
+            # Use the LARGER of user-provided and domain-recommended (never reduce below user's ask)
+            timeout_per_engine = max(timeout_per_engine, int(_adaptive_timeout))
+
         # --- 1. Site Analysis ---
         logger.info("[%s] Phase 1: Site analysis", job_id)
         _emit("analyzing", 0.05)
+        if timeline:
+            timeline.record("site_analysis")
         analyzer = SiteAnalyzer()
         try:
             analysis = analyzer.analyze(url, timeout=min(timeout_per_engine, 15))
         except Exception as exc:
             logger.warning("[%s] Site analysis failed: %s", job_id, exc)
             analysis = {"site_type": "unknown", "initial_html": "", "initial_status": 0}
+        finally:
+            if timeline:
+                timeline.finish("site_analysis")
 
         logger.info("[%s] Site type: %s | SPA: %s | API: %s",
                     job_id, analysis.get("site_type"),
@@ -493,6 +573,7 @@ class Orchestrator:
         _PARALLELIZABLE = {
             "static_requests", "static_httpx", "static_urllib",
             "structured_metadata", "search_index", "file_data",
+            "endpoint_probe", "secret_scan",
         }
 
         from engines.engine_retry import retry_engine_run
@@ -552,13 +633,17 @@ class Orchestrator:
                                job_id, result.engine_id, exc)
 
         total_engines = len(selected_engines)
-        _engines_done = [0]   # mutable int for closure
+        _engines_done = [0]               # mutable int for closure
+        _engines_done_lock = threading.Lock()  # guards parallel increment
 
         _orig_run_one = _run_one
         def _run_one_with_progress(engine_id: str) -> EngineResult:
             res = _orig_run_one(engine_id)
-            _engines_done[0] += 1
-            pct = 0.15 + (_engines_done[0] / max(total_engines, 1)) * 0.60
+            # Atomically increment and read under the lock so that concurrent
+            # threads cannot interleave their read–add–write and lose counts.
+            with _engines_done_lock:
+                _engines_done[0] += 1
+                pct = 0.15 + (_engines_done[0] / max(total_engines, 1)) * 0.60
             _emit("running_engine", round(pct, 3), engine_id=engine_id,
                   success=res.success, elapsed_s=res.elapsed_s)
             return res
@@ -569,44 +654,70 @@ class Orchestrator:
             logger.info("[%s] Running %d static engines in parallel: %s",
                         job_id, len(parallel_ids), parallel_ids)
             _emit("running_parallel", 0.15, count=len(parallel_ids))
+            if timeline:
+                timeline.record("parallel_engines")
             with ThreadPoolExecutor(max_workers=min(len(parallel_ids), 4)) as pool:
                 futures = {pool.submit(_run_one, eid): eid for eid in parallel_ids}
                 for future in as_completed(futures):
                     result = future.result()
                     engine_results.append(result)
                     _save_raw(result)
+            if timeline:
+                timeline.finish("parallel_engines")
 
-        # Phase 3b — launch shared Playwright browser for all browser engines
-        _browser = None
+        # --- Circuit Breaker: mass-failure detection ---
+        _CIRCUIT_BREAKER_RATIO = float(os.environ.get("CIRCUIT_BREAKER_RATIO", "0.70"))
+        _CIRCUIT_BREAKER_MIN = int(os.environ.get("CIRCUIT_BREAKER_MIN_ENGINES", "3"))
+        if len(engine_results) >= _CIRCUIT_BREAKER_MIN:
+            _fail_count = sum(1 for r in engine_results if not r.success)
+            _fail_ratio = _fail_count / len(engine_results)
+            if _fail_ratio >= _CIRCUIT_BREAKER_RATIO:
+                logger.warning(
+                    "[%s] Circuit breaker triggered: %.0f%% of %d engines failed — "
+                    "skipping remaining browser engines",
+                    job_id, _fail_ratio * 100, len(engine_results),
+                )
+                _emit("circuit_breaker", 0.45,
+                      fail_ratio=_fail_ratio, msg="mass_failure_detected")
+                # Only run the most robust sequential engine, skip the rest
+                _first_sequential = sequential_ids[:1]
+                sequential_ids = _first_sequential
+
+        # Phase 3b — run sequential (browser-dependent) engines one by one.
+        # Each browser engine manages its own async Playwright instance internally,
+        # so no shared browser is needed here.
         if sequential_ids:
-            try:
-                from playwright.sync_api import sync_playwright
-                _pw_ctx = sync_playwright().__enter__()
-                _browser = _pw_ctx.chromium.launch(headless=True)
-                context.playwright_browser = _browser
-                logger.info("[%s] Shared Playwright browser launched", job_id)
-            except Exception as _bexc:
-                logger.warning("[%s] Could not launch shared browser: %s", job_id, _bexc)
             _emit("running_sequential", 0.45, count=len(sequential_ids))
 
         try:
+            if timeline:
+                timeline.record("sequential_engines")
             for engine_id in sequential_ids:
                 result = _run_one(engine_id)
                 engine_results.append(result)
                 _save_raw(result)
         finally:
-            if _browser is not None:
-                try:
-                    _browser.close()
-                    _pw_ctx.__exit__(None, None, None)
-                    logger.info("[%s] Shared Playwright browser closed", job_id)
-                except Exception:
-                    pass
-            context.playwright_browser = None
+            if timeline:
+                timeline.finish("sequential_engines")
+
+        # --- Generate HAR file from network_observe payloads ---
+        _har_path = ""
+        try:
+            _net_results = [r for r in engine_results if r.engine_id == "network_observe"]
+            if _net_results and _net_results[0].api_payloads:
+                _har_path = network_payloads_to_har(
+                    _net_results[0].api_payloads, url, job_id, self.output_dir
+                )
+                if _har_path:
+                    logger.info("[%s] HAR file saved: %s", job_id, _har_path)
+        except Exception as _har_exc:
+            logger.warning("[%s] HAR generation failed: %s", job_id, _har_exc)
 
         # --- 5. Normalize ---
         _emit("normalizing", 0.78)
         logger.info("[%s] Phase 4: Normalizing %d results", job_id, len(engine_results))
+        if timeline:
+            timeline.record("normalize")
         normalized_results: list[dict] = []
         for result in engine_results:
             try:
@@ -615,15 +726,21 @@ class Orchestrator:
             except Exception as exc:
                 logger.warning("[%s] Normalization failed for %s: %s",
                                job_id, result.engine_id, exc)
+        if timeline:
+            timeline.finish("normalize")
 
         # --- 6. Merge ---
         _emit("merging", 0.85)
         logger.info("[%s] Phase 5: Merging and cross-validating", job_id)
+        if timeline:
+            timeline.record("merge")
         try:
             merged = merge(normalized_results)
             merged["job_id"] = job_id
             merged["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             merged["site_analysis"] = analysis
+            if timeline:
+                timeline.finish("merge")
 
             # --- 6b. Change detection ---
             try:
@@ -637,19 +754,131 @@ class Orchestrator:
                 logger.warning("[%s] Change detection failed: %s", job_id, exc)
                 merged["change_detection"] = {"error": str(exc)}
 
+            # --- 6c. Quality annotation (validation, email, phone, LLM hallucination) ---
+            try:
+                _raw_html = next(
+                    (r.get("_raw_html", "") for r in normalized_results if r.get("_raw_html")),
+                    "",
+                )
+                merged = annotate_quality(merged, _raw_html)
+                _q = merged.get("_quality", {})
+                logger.info("[%s] Quality: schema_valid=%s quality_score=%.3f hallucinations=%d",
+                            job_id, _q.get("schema_valid"), _q.get("quality_score"),
+                            len([v for v in _q.get("hallucination_report", {}).values()
+                                 if isinstance(v, dict) and v.get("hallucinated")]))
+            except Exception as _qe:
+                logger.warning("[%s] Quality annotation failed: %s", job_id, _qe)
+
+            # --- 6c½. Selector fallback chains ---
+            # If merger produced empty critical fields, try extracting from cached HTML
+            _fallback_html = context.initial_html
+            if not _fallback_html:
+                # Try to find HTML from any successful engine result
+                _fallback_html = next(
+                    (r.html for r in engine_results if r.success and r.html), ""
+                )
+            if _fallback_html:
+                try:
+                    from parser import (
+                        extract_title, extract_main_content, extract_meta_tags,
+                    )
+                    if not merged.get("title"):
+                        _fb_title = extract_title(_fallback_html)
+                        if _fb_title:
+                            merged["title"] = _fb_title
+                            merged.setdefault("_fallback_fields", []).append("title")
+                            logger.info("[%s] Fallback: filled empty title from HTML",
+                                        job_id)
+                    if not merged.get("main_content"):
+                        _fb_content = extract_main_content(_fallback_html)
+                        if _fb_content:
+                            merged["main_content"] = _fb_content
+                            merged.setdefault("_fallback_fields", []).append(
+                                "main_content"
+                            )
+                            logger.info(
+                                "[%s] Fallback: filled empty main_content from HTML",
+                                job_id,
+                            )
+                    if not merged.get("description"):
+                        _fb_meta = extract_meta_tags(_fallback_html)
+                        _fb_desc = next(
+                            (m.get("content", "") for m in _fb_meta
+                             if m.get("name", "").lower() == "description"),
+                            "",
+                        )
+                        if _fb_desc:
+                            merged["description"] = _fb_desc
+                            merged.setdefault("_fallback_fields", []).append(
+                                "description"
+                            )
+                            logger.info(
+                                "[%s] Fallback: filled empty description from meta",
+                                job_id,
+                            )
+                except Exception as _fb_exc:
+                    logger.warning("[%s] Selector fallback failed: %s",
+                                   job_id, _fb_exc)
+
+            # --- 6d. Attach phase timeline to merged output ---
+            if timeline:
+                merged["phase_timeline"] = timeline.to_list()
+            if _har_path:
+                merged["har_path"] = _har_path
+
         except Exception as exc:
             logger.exception("[%s] Merge failed: %s", job_id, exc)
             merged = {"error": str(exc), "job_id": job_id}
 
-        # --- 6c. Update domain adaptive-learning profile ---
+        # --- 6e. Update domain adaptive-learning profile ---
         try:
             _dp_outcomes = [
                 {"engine_id": r.engine_id, "success": r.success, "elapsed_s": r.elapsed_s}
                 for r in engine_results
             ]
             _dp_store.update_from_job(url, _dp_outcomes)
+
+            # Per-field accuracy update
+            from domain_profile import _domain_from_url
+            _domain = _domain_from_url(url)
+            for r in engine_results:
+                if not r.success:
+                    continue
+                # A field is "successful" for an engine if it produced a non-empty value
+                norm = next((n for n in normalized_results
+                             if n.get("engine_id") == r.engine_id), {})
+                field_ok = {
+                    f: bool(norm.get(f))
+                    for f in ("title", "description", "main_content", "headings",
+                               "links", "canonical_url", "language")
+                }
+                _dp_store.update_field_accuracy(_domain, r.engine_id, field_ok)
         except Exception as _dpe:
             logger.warning("[%s] DomainProfile update failed: %s", job_id, _dpe)
+
+        # --- 6f. History store — record versioned snapshot ---
+        try:
+            if HistoryStore is not None:
+                _hist_db = os.path.join(self.output_dir, "history.sqlite")
+                _hist = HistoryStore(_hist_db)
+                _version = _hist.record(url, job_id, merged)
+                merged["result_version"] = _version
+                logger.info("[%s] HistoryStore: saved version %d for %s", job_id, _version, url)
+        except Exception as _he:
+            logger.warning("[%s] HistoryStore.record failed: %s", job_id, _he)
+
+        # --- 6g. Audit log ---
+        try:
+            if AuditLog is not None:
+                _audit_db = os.path.join(self.output_dir, "audit.sqlite")
+                _audit = AuditLog(_audit_db)
+                _decisions = build_decisions_from_merge(normalized_results, merged)
+                _audit.record_job_decisions(job_id, url, _decisions)
+                _audit_path = _audit.write_audit_json(job_id, self.output_dir)
+                merged["audit_path"] = _audit_path
+                logger.info("[%s] AuditLog: %d field decisions written", job_id, len(_decisions))
+        except Exception as _ae:
+            logger.warning("[%s] AuditLog failed: %s", job_id, _ae)
 
         # --- 6d. Confidence gate — auto re-scrape with JS engines if score too low ---
         _CONFIDENCE_THRESHOLD = float(
@@ -704,9 +933,116 @@ class Orchestrator:
             except Exception as _retry_exc:
                 logger.warning("[%s] Confidence re-scrape failed: %s", job_id, _retry_exc)
 
+        # --- 6h. Full Crawl Mode — per-page lightweight extraction ---
+        if full_crawl_mode:
+            _emit("full_crawl", 0.90, message="Per-page extraction starting…")
+            logger.info("[%s] Phase 6h: Full-crawl per-page extraction", job_id)
+            try:
+                # Gather discovered page URLs from crawl_discovery result
+                _crawl_pages: list[dict] = merged.get("pages", [])
+                if not _crawl_pages:
+                    for _er in engine_results:
+                        if _er.engine_id == "crawl_discovery" and _er.success:
+                            _crawl_pages = _er.data.get("pages", [])
+                            break
+
+                _seed_normalised = url.rstrip("/")
+                _page_urls = [
+                    p["url"] for p in _crawl_pages
+                    if isinstance(p.get("url"), str)
+                    and p["url"].rstrip("/") != _seed_normalised
+                ][:50]  # hard cap: 50 pages to avoid runaway resource use
+
+                if _page_urls:
+                    logger.info("[%s] FullCrawl: %d pages to extract", job_id, len(_page_urls))
+
+                    # Engines to run per page (lightweight, parallelisable)
+                    _FC_ENGINES = ["static_requests", "static_httpx",
+                                   "endpoint_probe", "secret_scan"]
+
+                    def _extract_one_page(page_url: str) -> dict:
+                        """Run lightweight extraction on a single discovered page."""
+                        try:
+                            _pg_ctx = EngineContext(
+                                job_id=f"{job_id}_pg",
+                                url=page_url,
+                                depth=1,
+                                max_pages=1,
+                                timeout=min(timeout_per_engine, 30),
+                                raw_output_dir=raw_output_dir,
+                                respect_robots=respect_robots,
+                            )
+                            _pg_rs: list = []
+                            for _eid in _FC_ENGINES:
+                                try:
+                                    mod = importlib.import_module(f"engines.engine_{_eid}")
+                                    _pg_rs.append(mod.run(page_url, _pg_ctx))
+                                except Exception:
+                                    pass
+                            if not _pg_rs:
+                                return {"url": page_url, "error": "all engines failed"}
+                            _pg_norm   = [normalize(r) for r in _pg_rs]
+                            _pg_merged = merge(_pg_norm)
+                            return {
+                                "url":               page_url,
+                                "title":             _pg_merged.get("title", ""),
+                                "description":       _pg_merged.get("description", ""),
+                                "main_content":      (_pg_merged.get("main_content") or "")[:2000],
+                                "headings":          _pg_merged.get("headings", [])[:20],
+                                "links":             _pg_merged.get("links", [])[:50],
+                                "leaked_secrets":    _pg_merged.get("leaked_secrets", []),
+                                "detected_endpoints":_pg_merged.get("detected_endpoints", []),
+                                "confidence_score":  _pg_merged.get("confidence_score", 0.0),
+                            }
+                        except Exception as _pge:
+                            logger.warning("[%s] FullCrawl page %s: %s", job_id, page_url, _pge)
+                            return {"url": page_url, "error": str(_pge)}
+
+                    import concurrent.futures as _cf
+                    with _cf.ThreadPoolExecutor(max_workers=3) as _pool:
+                        _fc_results = list(_pool.map(_extract_one_page, _page_urls))
+
+                    merged["crawl_page_results"] = _fc_results
+
+                    # Aggregate secrets + endpoints back into the top-level merged doc
+                    _existing_secret_keys: set = {
+                        (s.get("pattern_name"), s.get("match_preview"), s.get("source_url"))
+                        for s in merged.get("leaked_secrets", [])
+                    }
+                    _existing_ep_urls: set = {
+                        ep.get("url") for ep in merged.get("detected_endpoints", [])
+                    }
+                    for _pgr in _fc_results:
+                        for _ps in _pgr.get("leaked_secrets", []):
+                            _sk = (_ps.get("pattern_name"), _ps.get("match_preview"), _ps.get("source_url"))
+                            if _sk not in _existing_secret_keys:
+                                merged.setdefault("leaked_secrets", []).append(_ps)
+                                _existing_secret_keys.add(_sk)
+                        for _ep in _pgr.get("detected_endpoints", []):
+                            if _ep.get("url") not in _existing_ep_urls:
+                                merged.setdefault("detected_endpoints", []).append(_ep)
+                                _existing_ep_urls.add(_ep.get("url"))
+
+                    logger.info(
+                        "[%s] FullCrawl: %d pages extracted, secrets total=%d, endpoints total=%d",
+                        job_id, len(_fc_results),
+                        len(merged.get("leaked_secrets", [])),
+                        len(merged.get("detected_endpoints", [])),
+                    )
+                else:
+                    logger.info(
+                        "[%s] FullCrawl: no new pages found "
+                        "(enable crawl_discovery engine with depth > 1)",
+                        job_id,
+                    )
+            except Exception as _fce:
+                logger.warning("[%s] FullCrawl phase failed: %s", job_id, _fce)
+
         # --- 7. Save reports ---
         _emit("writing_reports", 0.92)
         logger.info("[%s] Phase 6: Generating reports", job_id)
+        if timeline:
+            timeline.record("reports")
         report_json_path = ""
         report_html_path = ""
         try:
@@ -715,14 +1051,33 @@ class Orchestrator:
             report_html_path = write_html_report(merged, engine_results, job_id, self.output_dir)
         except Exception as exc:
             logger.exception("[%s] Report generation failed: %s", job_id, exc)
+        if timeline:
+            timeline.finish("reports")
 
         total_elapsed = round(time.time() - job_start, 2)
+        # Tag final elapsed and timeline into merged
+        merged["_total_elapsed_s"] = total_elapsed
+        if timeline:
+            merged["phase_timeline"] = timeline.to_list()
+
+        # --- Prometheus metrics ---
+        try:
+            _eng_summaries = [{"engine_id": r.engine_id, "success": r.success,
+                               "elapsed_s": r.elapsed_s} for r in engine_results]
+            record_job_completed(
+                status="done",
+                confidence=float(merged.get("confidence_score", 0.0)),
+                engine_results=_eng_summaries,
+            )
+        except Exception:
+            pass
+
         logger.info("[%s] ===== JOB COMPLETE in %.2fs =====", job_id, total_elapsed)
         _emit("done", 1.0, total_elapsed_s=total_elapsed)
 
-        # Remove per-job file handler
-        root_logger.removeHandler(file_handler)
-        file_handler.close()
+        # Remove per-job file handler via the shared helper (idempotent).
+        # This is the primary cleanup for the normal-completion path.
+        _cleanup_job_log_handler(job_id)
 
         return JobResult(
             job_id=job_id,

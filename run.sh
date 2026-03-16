@@ -81,6 +81,13 @@ info "Workers  : $WORKERS"
 [[ ${#EXTRA_ARGS[@]} -gt 0 ]] && info "Extra args: ${EXTRA_ARGS[*]}"
 echo ""
 
+# ── Kill any stale process already on the port ───────────────────────────────
+if fuser "${PORT}/tcp" &>/dev/null; then
+    warn "Port $PORT already in use — killing stale process …"
+    fuser -k "${PORT}/tcp" 2>/dev/null || true
+    sleep 1
+fi
+
 # ── Run ───────────────────────────────────────────────────────────────────────
 cd "$BACKEND_DIR"
 

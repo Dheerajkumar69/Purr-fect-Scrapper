@@ -260,8 +260,6 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
 
 
 def run(url: str, context: "EngineContext") -> "EngineResult":
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(_run_async(url, context))
-    finally:
-        loop.close()
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+        return _pool.submit(asyncio.run, _run_async(url, context)).result()

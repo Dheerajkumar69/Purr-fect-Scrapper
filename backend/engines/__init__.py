@@ -87,4 +87,6 @@ ENGINE_IDS = [
     "visual_ocr",
     "hybrid",
     "ai_assist",
+    "endpoint_probe",
+    "secret_scan",
 ]

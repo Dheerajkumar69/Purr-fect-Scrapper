@@ -197,14 +197,13 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
     warnings: list[str] = []
 
     try:
-        # Capture screenshot
-        loop = asyncio.new_event_loop()
-        try:
-            png_bytes, status_code, final_url = loop.run_until_complete(
-                _capture_screenshot(url, context)
-            )
-        finally:
-            loop.close()
+        # Capture screenshot in an isolated thread so we never collide with
+        # uvicorn's running event loop inside the ThreadPoolExecutor workers.
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+            png_bytes, status_code, final_url = _pool.submit(
+                asyncio.run, _capture_screenshot(url, context)
+            ).result()
 
         if not png_bytes:
             return EngineResult(

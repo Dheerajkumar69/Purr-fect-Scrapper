@@ -40,6 +40,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
     attempt_log: list[dict] = []
     warnings: list[str] = []
     best_result: "EngineResult | None" = None
+    best_engine_id: str = "none"
 
     # --- Step 1: Static requests (fastest) ---
     logger.info("[%s] Hybrid step 1: static requests", context.job_id)
@@ -56,6 +57,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
             return best_result
         if r.success:
             best_result = r  # keep as fallback even if thin
+            best_engine_id = r.engine_id
             warnings.append(f"Static scrape thin ({len(r.text or '')} chars); trying headless.")
         else:
             warnings.append(f"Static scrape failed: {r.error}")
@@ -77,6 +79,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
             return best_result
         if r.success and (not best_result or len(r.text or "") > len(best_result.text or "")):
             best_result = r
+            best_engine_id = r.engine_id
             warnings.append(f"Headless scrape thin ({len(r.text or '')} chars); trying interaction.")
         elif not r.success:
             warnings.append(f"Headless scrape failed: {r.error}")
@@ -98,6 +101,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
             return best_result
         if r.success and (not best_result or len(r.text or "") > len(best_result.text or "")):
             best_result = r
+            best_engine_id = r.engine_id
             warnings.append(f"DOM interaction thin ({len(r.text or '')} chars); trying visual OCR.")
         elif not r.success:
             warnings.append(f"DOM interaction failed: {r.error}")
@@ -113,6 +117,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
                              "text_len": len(r.text or ""), "error": r.error})
         if r.success and (not best_result or len(r.text or "") > len(best_result.text or "")):
             best_result = r
+            best_engine_id = r.engine_id
         elif not r.success:
             warnings.append(f"Visual OCR failed: {r.error}")
     except Exception as exc:
@@ -124,7 +129,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
         best_result.engine_name = engine_name
         best_result.warnings.extend(warnings)
         best_result.data["hybrid_chain"] = attempt_log
-        best_result.data["hybrid_winner"] = attempt_log[-1]["engine"] if attempt_log else "none"
+        best_result.data["hybrid_winner"] = best_engine_id
         best_result.elapsed_s = time.time() - start
         return best_result
 

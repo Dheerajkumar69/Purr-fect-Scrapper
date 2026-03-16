@@ -103,6 +103,26 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   .section-title { font-size: 1.3rem; font-weight: 700; margin: 2rem 0 1rem; border-left: 3px solid var(--accent); padding-left: .75rem; }
 
   footer { text-align: center; padding: 2rem; color: var(--text2); font-size: .8rem; border-top: 1px solid var(--border); margin-top: 2rem; }
+
+  /* Endpoint probe table */
+  .ep-table { width: 100%; border-collapse: collapse; font-size: .8rem; margin-top: .75rem; }
+  .ep-table th { background: var(--surface2); padding: .5rem .7rem; text-align: left; font-size: .72rem; color: var(--text2); text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
+  .ep-table td { padding: .45rem .7rem; border-bottom: 1px solid var(--border); vertical-align: middle; word-break: break-all; }
+  .ep-url { font-family: monospace; font-size: .78rem; color: #67e8f9; max-width: 340px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .risk-badge { display: inline-block; padding: .1rem .45rem; border-radius: 4px; font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+  .risk-badge.risk-high   { background: rgba(239,68,68,.18); color: #f87171; border: 1px solid rgba(239,68,68,.4); }
+  .risk-badge.risk-medium { background: rgba(251,146,60,.15); color: #fb923c; border: 1px solid rgba(251,146,60,.35); }
+  .risk-badge.risk-low    { background: rgba(74,222,128,.12); color: #4ade80; border: 1px solid rgba(74,222,128,.3); }
+  .risk-badge.risk-info   { background: rgba(148,163,184,.1); color: #94a3b8; border: 1px solid rgba(148,163,184,.25); }
+  .ep-filter-bar { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: .75rem; }
+  .ep-filter-bar span { display: inline-block; padding: .15rem .5rem; border-radius: 4px; font-size: .75rem; font-weight: 600; cursor: default; }
+  .more-hint { color: var(--text2); font-size: .8rem; margin-top: .5rem; }
+  .ep-summary-badges { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .85rem; }
+  .ep-summary-badge { display: inline-block; padding: .2rem .65rem; border-radius: 999px; font-size: .75rem; font-weight: 600; }
+  .ep-badge-green  { background: rgba(34,197,94,.15); color: #4ade80; border: 1px solid rgba(34,197,94,.3); }
+  .ep-badge-purple { background: rgba(167,139,250,.15); color: #a78bfa; border: 1px solid rgba(167,139,250,.3); }
+  .ep-badge-red    { background: rgba(239,68,68,.15); color: #f87171; border: 1px solid rgba(239,68,68,.3); }
+  .ep-badge-gray   { background: rgba(148,163,184,.1); color: #94a3b8; border: 1px solid rgba(148,163,184,.2); }
 </style>
 </head>
 <body>
@@ -290,6 +310,81 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
   {% endif %}
 
+  <!-- EXPOSED ENDPOINTS (endpoint_probe engine) -->
+  {% if detected_endpoints %}
+  <div class="card">
+    <h2>🔍 Exposed Endpoints &amp; APIs ({{ detected_endpoints|length }})</h2>
+
+    {% if endpoint_probe_summary %}
+    <div class="ep-summary-badges">
+      {% if endpoint_probe_summary.openapi_discovered %}
+      <span class="ep-summary-badge ep-badge-green">📄 OpenAPI: {{ endpoint_probe_summary.openapi_url or '' }}</span>
+      {% endif %}
+      {% if endpoint_probe_summary.graphql_discovered %}
+      <span class="ep-summary-badge ep-badge-purple">⬡ GraphQL: {{ endpoint_probe_summary.graphql_url or '' }}</span>
+      {% endif %}
+      {% if endpoint_probe_summary.cors_exposed_count %}
+      <span class="ep-summary-badge ep-badge-red">⚠ CORS Wildcard: {{ endpoint_probe_summary.cors_exposed_count }} endpoint{{ 's' if endpoint_probe_summary.cors_exposed_count != 1 else '' }}</span>
+      {% endif %}
+      {% if endpoint_probe_summary.websocket_endpoints %}
+      <span class="ep-summary-badge ep-badge-purple">⚡ WebSocket: {{ endpoint_probe_summary.websocket_endpoints|length }}</span>
+      {% endif %}
+      {% if endpoint_probe_summary.risk_summary %}
+      {% set rs = endpoint_probe_summary.risk_summary %}
+      {% if rs.high_count %}<span class="ep-summary-badge ep-badge-red">HIGH: {{ rs.high_count }}</span>{% endif %}
+      {% if rs.medium_count %}<span class="ep-summary-badge" style="background:rgba(251,146,60,.15);color:#fb923c;border:1px solid rgba(251,146,60,.3)">MEDIUM: {{ rs.medium_count }}</span>{% endif %}
+      {% endif %}
+      {% if endpoint_probe_summary.js_files_analyzed %}
+      <span class="ep-summary-badge ep-badge-gray">JS files analysed: {{ endpoint_probe_summary.js_files_analyzed }}</span>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <table class="ep-table">
+      <thead>
+        <tr>
+          <th>URL</th><th>Method</th><th>Source</th>
+          <th>Auth</th><th>CORS</th><th>Status</th><th>Risk</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for ep in detected_endpoints[:60] %}
+      <tr>
+        <td><span class="ep-url" title="{{ ep.url }}">{{ ep.url }}</span></td>
+        <td><code style="font-size:.75rem">{{ ep.method }}</code></td>
+        <td style="color:var(--text2);font-size:.75rem">{{ ep.source | replace('_', ' ') }}</td>
+        <td>
+          {% if ep.auth_required == false %}
+            <span style="color:#f87171">✗ Open</span>
+          {% elif ep.auth_required == true %}
+            <span style="color:#4ade80">✓ Auth</span>
+          {% else %}
+            <span style="color:#94a3b8">?</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if ep.cors_permissive %}
+            <span style="color:#fb923c">⚠ Wildcard</span>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if ep.status_code %}
+            <span style="color:{% if ep.status_code == 200 %}#4ade80{% elif ep.status_code in [401,403] %}#fb923c{% else %}#94a3b8{% endif %}">
+              {{ ep.status_code }}
+            </span>
+          {% else %}—{% endif %}
+        </td>
+        <td><span class="risk-badge risk-{{ ep.risk_level | lower }}">{{ ep.risk_level }}</span></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if detected_endpoints|length > 60 %}
+    <div class="more-hint">+{{ detected_endpoints|length - 60 }} more endpoints in the JSON report</div>
+    {% endif %}
+  </div>
+  {% endif %}
+
   <!-- LINKS -->
   {% if links %}
   <div class="card">
@@ -350,19 +445,58 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   {% endif %}
 
   <!-- NAVIGATION STRUCTURE -->
-  {% if nav_links %}
+  {% if links %}
   <div class="card">
-    <h2>🧭 Navigation Structure ({{ nav_links|length }} nav links)</h2>
-    <table>
-      <tr><th>Label</th><th>URL</th></tr>
-      {% for nl in nav_links[:50] %}
-      <tr>
-        <td style="font-size:.85rem">{{ nl.text or "—" }}</td>
-        <td><a href="{{ nl.href }}" target="_blank" style="font-size:.78rem">{{ nl.href[:70] }}{% if nl.href|length > 70 %}…{% endif %}</a></td>
-      </tr>
-      {% endfor %}
-    </table>
-    {% if nav_links|length > 50 %}<div style="color:var(--text2);font-size:.8rem;margin-top:.5rem">+{{ nav_links|length - 50 }} more…</div>{% endif %}
+    <h2>🧭 Navigation Structure ({{ links|length }} links)</h2>
+
+    <!-- Tree view: group links by domain -->
+    <div id="nav-tree" style="margin-bottom:1rem"></div>
+    <script>
+    (function(){
+      var links = {{ links_json }};
+      var byDomain = {};
+      links.forEach(function(l){
+        var href = l.href || '';
+        try {
+          var u = new URL(href);
+          var d = u.hostname;
+          if (!byDomain[d]) byDomain[d] = [];
+          byDomain[d].push({path: u.pathname + u.search, text: l.text || href, href: href});
+        } catch(e) {}
+      });
+      var container = document.getElementById('nav-tree');
+      var domains = Object.keys(byDomain).sort();
+      domains.forEach(function(d){
+        var det = document.createElement('details');
+        det.className = 'collapsible';
+        det.style.marginBottom = '.35rem';
+        var sum = document.createElement('summary');
+        sum.textContent = d + ' (' + byDomain[d].length + ' links)';
+        det.appendChild(sum);
+        var ul = document.createElement('ul');
+        ul.style.cssText = 'list-style:none;padding-left:1rem;max-height:200px;overflow-y:auto';
+        byDomain[d].slice(0, 50).forEach(function(item){
+          var li = document.createElement('li');
+          li.style.cssText = 'padding:.15rem 0;font-size:.82rem;border-bottom:1px solid var(--border)';
+          var a = document.createElement('a');
+          a.href = item.href; a.target = '_blank'; a.rel = 'noopener noreferrer';
+          a.textContent = item.text || item.path;
+          a.style.color = 'var(--text2)';
+          li.appendChild(a);
+          ul.appendChild(li);
+        });
+        if (byDomain[d].length > 50) {
+          var more = document.createElement('li');
+          more.style.cssText = 'color:var(--text2);font-size:.78rem;padding:.3rem 0';
+          more.textContent = '+' + (byDomain[d].length - 50) + ' more…';
+          ul.appendChild(more);
+        }
+        det.appendChild(ul);
+        container.appendChild(det);
+      });
+      if (!domains.length) container.style.display = 'none';
+    })();
+    </script>
   </div>
   {% endif %}
 
@@ -430,6 +564,17 @@ def write_html_report(
 
     try:
         from jinja2 import Environment
+        try:
+            from markupsafe import Markup  # preferred: markupsafe is the upstream package
+        except ImportError:
+            from jinja2 import Markup  # type: ignore[no-redef]  # Jinja2 re-exports it
+
+        def _script_safe_json(obj: Any) -> str:
+            """JSON-encode obj and escape </ to prevent </script> injection in inline scripts."""
+            raw = json.dumps(obj, default=str, ensure_ascii=False)
+            # Replace </ → <\/ so </script> in scraped data can never close the script tag
+            return raw.replace("</", "<\\/")
+
         env = Environment(autoescape=True)
         env.filters["tojson"] = lambda v, indent=None: json.dumps(v, indent=indent, default=str)
 
@@ -461,6 +606,8 @@ def write_html_report(
             images=merged.get("images", []),
             structured_data=merged.get("structured_data", {}),
             detected_api_data=merged.get("detected_api_data", []),
+            detected_endpoints=merged.get("detected_endpoints", []),
+            endpoint_probe_summary=merged.get("endpoint_probe_summary", {}),
             keywords=merged.get("keywords", []),
             canonical_url=merged.get("canonical_url", ""),
             language=merged.get("language", ""),
@@ -483,6 +630,7 @@ def write_html_report(
                                          for e in merged.get("engine_summary", []))),
             crawl_pages=crawl_pages,
             nav_links=nav_links,
+            links_json=Markup(_script_safe_json(merged.get("links", []))),
             change_detection=merged.get("change_detection"),
         )
 

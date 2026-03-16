@@ -840,3 +840,32 @@ def parse_all(
         data["custom_xpath"] = parse_custom_xpath(html, custom_xpath, base_url)
 
     return data
+
+
+# ---------------------------------------------------------------------------
+# HTML-string convenience wrappers (used by orchestrator fallback chain)
+# These accept a raw HTML string and wrap the soup-based parsers.
+# ---------------------------------------------------------------------------
+
+def extract_title(html: str) -> str:
+    """Parse *html* string and return the page title, or ''."""
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "lxml")
+    return parse_title(soup)
+
+
+def extract_main_content(html: str) -> str:
+    """Parse *html* string and return the semantic main content, or ''."""
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "lxml")
+    return parse_main_content(soup)
+
+
+def extract_meta_tags(html: str) -> list[dict]:
+    """Parse *html* string and return list of meta-tag dicts (same as parse_meta)."""
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "lxml")
+    return parse_meta(soup)

@@ -1,8 +1,6 @@
-# Universal Website Scraper
+# Universal Multi-Engine Web Scraper
 
-A **Simple, Lovable, Complete** (SLC) web scraper that accepts any public URL,
-lets users choose exactly what to extract, and returns structured JSON — all
-through a clean browser UI or a REST API.
+A **modular, production-grade** web scraping platform that orchestrates **15 specialized engines** to extract structured data from any website — static HTML, SPAs, login-protected pages, PDFs, and more.
 
 ---
 
@@ -10,22 +8,23 @@ through a clean browser UI or a REST API.
 
 | Feature | Details |
 |---|---|
-| **Static scraping** | `requests` + `BeautifulSoup 4` + `lxml` — fast, no browser overhead |
-| **Dynamic scraping** | Playwright Chromium auto-fallback for JS-heavy / SPA pages |
-| **Anti-bot stealth** | `playwright-stealth` patches evade Cloudflare / bot-detection fingerprinting |
-| **10 data types** | title, meta, headings, paragraphs, links, images, tables, lists, forms, custom selector |
-| **Custom CSS / XPath** | User-defined selectors passed directly to the parser |
-| **Retry logic** | 3 retries with exponential back-off on 429/5xx and network errors |
-| **Brotli support** | `br` Content-Encoding decompression for CDN-served sites |
-| **SSRF protection** | Blocks localhost, all RFC-1918 / RFC-5737 private IPs, IPv6 ULA/link-local, NAT64 |
-| **DNS rebinding guard** | Every IP returned by DNS validated — not just the first |
-| **robots.txt respect** | Hard 403 when explicitly disallowed; soft warning when unreachable |
-| **Rate limiting** | 30 requests / minute per IP (slowapi) — 429 on breach |
-| **Body size guard** | Requests > 64 KB → 413; responses > 10 MB aborted mid-stream |
-| **Request tracking** | `X-Request-ID` header on every response |
-| **Beautiful UI** | Dark-mode responsive frontend — served by FastAPI at `/` |
-| **Download / Copy JSON** | One-click export with auto-generated filename |
-| **Docker support** | Multi-stage Dockerfile, non-root user, Python healthcheck |
+| **15 extraction engines** | Static (3), Browser (3), Semantic, Auth, Files, Crawl, Search Index, Visual OCR, Hybrid, AI, Endpoint Probe |
+| **Intelligent engine selection** | Automatic site analysis detects SPA/static/API-driven/file → picks optimal engines |
+| **Parallel + sequential execution** | Static engines run in `ThreadPoolExecutor`; browser engines share a Playwright context |
+| **Cross-validation & merging** | Levenshtein clustering, SimHash dedup, weighted voting, confidence scoring |
+| **Adaptive domain learning** | Per-domain engine success tracking; chronic failures auto-skipped on repeat visits |
+| **Confidence gate** | Auto re-scrapes with JS engines if confidence score drops below threshold |
+| **Circuit breaker** | Mass-failure detection stops remaining engines early |
+| **SSE real-time streaming** | Live progress events streamed to the frontend via Server-Sent Events |
+| **6 report formats** | JSON, HTML, CSV, XLSX, GraphML, HAR |
+| **Celery workers** | Async job execution via Redis broker with retry and stale-job cleanup |
+| **SSRF protection** | DNS rebinding guard, all RFC-1918/5737 private IPs blocked |
+| **robots.txt compliance** | Hard 403 when explicitly disallowed; soft warning when unreachable |
+| **Rate limiting** | 30 req/min per IP (slowapi) |
+| **Versioned history** | Time-series of scrape results per URL with structural redesign detection |
+| **Audit log** | Per-field extraction decision tracking with queryable SQLite store |
+| **Docker support** | Multi-stage Dockerfile, non-root user, healthcheck, Docker Compose |
+| **Beautiful dark-mode UI** | Engine selector, live progress, confidence panel, JSON viewer |
 
 ---
 
@@ -33,27 +32,60 @@ through a clean browser UI or a REST API.
 
 ```
 scrapperproject/
-│
 ├── backend/
-│   ├── main.py            # FastAPI app, routes, middleware, rate limiting
-│   ├── scraper.py         # StaticScraper (retry) + DynamicScraper (stealth) + auto_scrape
-│   ├── parser.py          # 11 pure parsing functions
-│   ├── utils.py           # URL validation, SSRF, robots.txt, helpers
+│   ├── main.py                  # FastAPI application (v1 + v2 APIs, job management)
+│   ├── orchestrator.py          # Pipeline runner (analysis → selection → execution → merge)
+│   ├── scraper.py               # Legacy v1 scraper (requests + Playwright fallback)
+│   ├── parser.py                # 11 HTML parsing functions (BS4/lxml)
+│   ├── normalizer.py            # Map engine outputs → unified schema
+│   ├── merger.py                # Cross-validation, dedup, confidence scoring
+│   ├── report.py                # JSON, HTML, CSV, XLSX, GraphML report generators
+│   ├── quality.py               # Email/phone validation, hallucination detection
+│   ├── utils.py                 # URL validation, SSRF, robots.txt, User-Agent
+│   ├── job_store.py             # SQLite job persistence
+│   ├── job_queue.py             # Priority queue with pause/resume/cancel
+│   ├── telemetry.py             # JSON logging, Prometheus metrics, phase timeline
+│   ├── audit_log.py             # Per-field extraction decision audit
+│   ├── history_store.py         # Versioned scrape history with diff detection
+│   ├── domain_profile.py        # Adaptive per-domain engine learning
+│   ├── crawl_checkpoint.py      # BFS crawl state persistence + crawl-delay
+│   ├── celery_app.py            # Celery application config
+│   ├── celery_tasks.py          # Celery task definitions
+│   ├── engines/
+│   │   ├── __init__.py          # EngineContext, EngineResult, ENGINE_IDS
+│   │   ├── engine_retry.py      # Reusable retry wrapper with exponential backoff
+│   │   ├── engine_static_requests.py
+│   │   ├── engine_static_httpx.py
+│   │   ├── engine_static_urllib.py
+│   │   ├── engine_headless_playwright.py
+│   │   ├── engine_dom_interaction.py
+│   │   ├── engine_network_observe.py
+│   │   ├── engine_structured_metadata.py
+│   │   ├── engine_session_auth.py
+│   │   ├── engine_file_data.py
+│   │   ├── engine_crawl_discovery.py
+│   │   ├── engine_search_index.py
+│   │   ├── engine_visual_ocr.py
+│   │   ├── engine_hybrid.py
+│   │   ├── engine_ai_assist.py
+│   │   └── engine_endpoint_probe.py
 │   ├── requirements.txt
 │   ├── pytest.ini
 │   └── tests/
 │       ├── conftest.py
-│       ├── test_api.py    # 19 FastAPI integration tests
-│       ├── test_utils.py  # 22 unit tests
-│       └── test_parser.py # 36 unit tests
-│
+│       ├── test_api.py          # FastAPI integration tests
+│       ├── test_utils.py        # URL validation unit tests
+│       ├── test_parser.py       # HTML parser unit tests
+│       ├── test_harsh.py        # Engine-level tests
+│       ├── test_endpoint_probe.py  # Endpoint probe engine tests
+│       └── test_integration.py  # Full pipeline integration tests
 ├── frontend/
-│   ├── index.html         # Single-page UI (served at http://localhost:8000/)
+│   ├── index.html
 │   ├── style.css
 │   └── script.js
-│
 ├── Dockerfile
-├── .gitignore
+├── docker-compose.yml
+├── .env.example
 └── README.md
 ```
 
@@ -65,14 +97,14 @@ scrapperproject/
 
 - Python 3.11 or 3.12
 
-### 1. Create a virtual environment and install dependencies
+### 1. Set up and install
 
 ```bash
 cd scrapperproject
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r backend/requirements.txt
-playwright install chromium         # only needed for JS-heavy pages
+playwright install chromium         # required for browser engines
 ```
 
 ### 2. Run the server
@@ -84,97 +116,110 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 ### 3. Open the UI
 
-Visit **http://localhost:8000** — the frontend is served directly by FastAPI.  
-Swagger API docs: **http://localhost:8000/docs**
+- **Web UI**: http://localhost:8000
+- **API Docs**: http://localhost:8000/docs
+- **Metrics**: http://localhost:8000/metrics (Prometheus)
 
 ---
 
-## 🐳 Docker
+## 🐳 Docker Compose (Recommended)
 
 ```bash
-docker build -t universal-scraper .
-
-# Development (open CORS)
-docker run -p 8000:8000 universal-scraper
-
-# Production (restrict CORS)
-docker run -p 8000:8000 \
-  -e ALLOWED_ORIGINS="https://yourdomain.com" \
-  universal-scraper
+cp .env.example .env          # edit as needed
+docker compose up --build -d
 ```
+
+This starts 4 services:
+
+| Service | Container | Purpose |
+|---|---|---|
+| `scraper` | `scraper` | FastAPI API + frontend (port 8000) |
+| `celery_worker` | `scraper_celery` | Async job execution (4 concurrent) |
+| `celery_beat` | `scraper_beat` | Periodic stale-job cleanup |
+| `redis` | `scraper_redis` | Message broker + result backend |
 
 ---
 
 ## 🔌 API Reference
 
-### `POST /scrape`
-
-**Request body** (JSON):
+### `POST /scrape` (v1 — Quick Scrape)
 
 ```json
 {
-  "url": "https://news.ycombinator.com",
+  "url": "https://example.com",
   "options": ["title", "headings", "links"],
-  "custom_css": null,
-  "custom_xpath": null,
-  "force_dynamic": false
+  "force_dynamic": false,
+  "respect_robots": true
 }
 ```
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `url` | string | ✅ | Public URL to scrape (http/https only) |
-| `options` | string[] | ✅ | `title` `meta` `headings` `paragraphs` `links` `images` `tables` `lists` `forms` `custom_css` `custom_xpath` |
-| `custom_css` | string\|null | — | CSS selector; used when `custom_css` is in `options` |
-| `custom_xpath` | string\|null | — | XPath expression; used when `custom_xpath` is in `options` |
-| `force_dynamic` | bool | — | Skip static scraper; go straight to Playwright |
-
-**Success response** (HTTP 200):
+### `POST /scrape/v2` (Multi-Engine)
 
 ```json
 {
-  "url": "https://news.ycombinator.com",
-  "status": "ok",
-  "mode": "static",
-  "http_status": 200,
-  "warnings": [],
-  "data": {
-    "title": "Hacker News",
-    "headings": [{ "level": 1, "text": "Hacker News" }],
-    "links": [{ "text": "new", "href": "https://news.ycombinator.com/newest", "rel": "", "title": "" }]
+  "url": "https://example.com",
+  "engines": ["static_requests", "headless_playwright", "structured_metadata"],
+  "depth": 1,
+  "timeout_per_engine": 30,
+  "respect_robots": true,
+  "credentials": {
+    "username": "user@example.com",
+    "password": "secret"
   }
 }
 ```
 
-The `warnings` array contains non-fatal notices (e.g. robots.txt unreachable, encoding fallback).
+Returns `{ "job_id": "abc123", "poll_url": "/jobs/abc123", "stream_url": "/jobs/abc123/stream" }`
 
-**Error responses**:
+### Job Management
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/jobs/{job_id}` | GET | Poll job status + result |
+| `/jobs/{job_id}/stream` | GET | SSE real-time progress stream |
+| `/jobs/{job_id}/cancel` | POST | Cancel a running job |
+| `/jobs/{job_id}/pause` | POST | Pause a queued job |
+| `/jobs/{job_id}/resume` | POST | Resume a paused job |
+| `/reports/{job_id}/json` | GET | Download JSON report |
+| `/reports/{job_id}/html` | GET | Download HTML report |
+| `/reports/{job_id}/csv` | GET | Download CSV report |
+| `/reports/{job_id}/xlsx` | GET | Download XLSX report |
+| `/reports/{job_id}/graphml` | GET | Download GraphML crawl map |
+| `/health` | GET | Health check |
+| `/metrics` | GET | Prometheus metrics |
+
+### Error Responses
 
 | HTTP | Reason |
 |---|---|
 | 400 | SSRF protection blocked the URL |
-| 403 | `robots.txt` disallows crawling this URL |
+| 403 | `robots.txt` disallows crawling |
 | 413 | Request body > 64 KB |
-| 422 | Validation error (bad URL scheme, unknown option, non-HTML content-type) |
-| 429 | Rate limit exceeded — try again in 60 s |
-| 502 | Upstream fetch failed (network error, redirect loop, timeout after 3 retries) |
-
-### `GET /health`
-
-```json
-{ "status": "ok", "version": "2.0.0" }
-```
+| 422 | Validation error |
+| 429 | Rate limit exceeded (30 req/min) |
+| 502 | Upstream fetch failed |
 
 ---
 
-## 🧪 Running Tests
+## 🔧 Engines
 
-```bash
-cd backend
-pytest tests/ -v
-```
-
-Expected: **77 passed** in < 2 s, zero warnings.
+| # | ID | Category | Strategy |
+|---|---|---|---|
+| 1 | `static_requests` | Static | Python requests + BS4/lxml |
+| 2 | `static_httpx` | Static | Async httpx HTTP/2 + html5lib |
+| 3 | `static_urllib` | Static | stdlib urllib — zero dependencies |
+| 4 | `headless_playwright` | Browser | Full Chromium, stealth, skeleton screen wait |
+| 5 | `dom_interaction` | Browser | Scroll, paginate, expand accordions |
+| 6 | `network_observe` | Browser | Capture live JSON API payloads |
+| 7 | `structured_metadata` | Semantic | JSON-LD, schema.org, OpenGraph, microdata |
+| 8 | `session_auth` | Auth | Playwright login → session cookie reuse |
+| 9 | `file_data` | Files | PDF, CSV, Excel, XML, RSS extraction |
+| 10 | `crawl_discovery` | Crawl | Sitemap.xml + breadth-first spider |
+| 11 | `search_index` | Index | Whoosh full-text index + keyword scoring |
+| 12 | `visual_ocr` | Vision | Screenshot → OpenCV → Tesseract OCR |
+| 13 | `hybrid` | Meta | Smart fallback: static → headless → DOM → OCR |
+| 14 | `ai_assist` | AI | LLM semantic extraction (opt-in) |
+| 15 | `endpoint_probe` | Security | API/endpoint exposure, CORS, GraphQL, OpenAPI detection |
 
 ---
 
@@ -182,48 +227,45 @@ Expected: **77 passed** in < 2 s, zero warnings.
 
 | Variable | Default | Description |
 |---|---|---|
-| `ALLOWED_ORIGINS` | `*` | Space-separated CORS origins. Restrict in production: `https://myapp.com` |
+| `LOG_LEVEL` | `INFO` | Python log level |
+| `SCRAPER_OUTPUT_DIR` | `/tmp/scraper_output` | Reports, raw captures, logs |
+| `ALLOWED_ORIGINS` | `*` | CORS origins (space-separated) |
+| `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis broker URL |
+| `CELERY_RESULT_BACKEND` | `redis://localhost:6379/1` | Redis result backend |
+| `SCRAPER_PROXIES` | _(none)_ | Comma-separated proxy URLs |
+| `AI_SCRAPER_ENABLED` | `0` | Enable AI Assist engine |
+| `AI_API_BASE` | _(none)_ | OpenAI-compatible API base URL |
+| `AI_API_KEY` | _(none)_ | API key for AI engine |
+| `AI_MODEL` | _(none)_ | Model name (e.g. `gpt-4o-mini`) |
+| `MAX_CONCURRENT_JOBS` | `4` | Concurrent job limit |
+| `MAX_QUEUED_JOBS` | `100` | Queue depth limit |
+| `CONFIDENCE_RESCRAPE_THRESHOLD` | `0.35` | Auto JS re-scrape threshold |
+| `CIRCUIT_BREAKER_RATIO` | `0.70` | Engine mass-failure cutoff |
+| `SCRAPER_API_KEY` | _(none)_ | API key gating (optional) |
+
+---
+
+## 🧪 Running Tests
+
+```bash
+cd backend
+source ../.venv/bin/activate
+pytest tests/ -v
+```
+
+Expected: **389+ passed** in ~90 s.
 
 ---
 
 ## 🔐 Security
 
-- Only `http`/`https` allowed — `ftp://`, `file://`, `javascript:`, `data:` all rejected.
-- All private IP ranges blocked: RFC-1918, loopback, link-local, shared address space, documentation ranges, NAT64.
-- DNS rebinding protection — every resolved IP is validated.
-- `robots.txt` is fetched and respected — disallowed → 403.
-- Rate limited at 30 req/min per IP.
-- User-Agent clearly identifies this tool.
-
-> Use responsibly. Ensure you have the right to scrape the target site.
-
----
-
-## 🧩 Architecture
-
-```
-Browser / API Client
-        │   POST /scrape
-        ▼
-┌──────────────────────────────────┐
-│   FastAPI  (main.py)             │  Rate limit · CORS · GZip · Body guard
-└────────────┬─────────────────────┘
-             │
-┌────────────▼─────────────────────┐
-│   utils.py                       │  URL validate → SSRF → robots.txt
-└────────────┬─────────────────────┘
-             │
-┌────────────▼─────────────────────┐
-│   StaticScraper (requests)       │  3-attempt retry · brotli · chardet
-│       ↓ empty body?              │
-│   DynamicScraper (Playwright)    │  playwright-stealth · networkidle
-└────────────┬─────────────────────┘
-             │  raw HTML
-┌────────────▼─────────────────────┐
-│   parser.py                      │  11 pure functions; no I/O
-└────────────┴─────────────────────┘
-        JSON Response
-```
+- Only `http`/`https` allowed — `ftp://`, `file://`, `javascript:`, `data:` all rejected
+- All private IP ranges blocked: RFC-1918, loopback, link-local, shared address space, NAT64
+- DNS rebinding protection — every resolved IP is validated
+- `robots.txt` is fetched and respected
+- Credentials handled in-memory only (never persisted to disk)
+- Rate limited at 30 req/min per IP
+- Non-root Docker user
 
 ---
 

@@ -15,7 +15,6 @@ import os
 import sys
 import time
 from typing import TYPE_CHECKING
-from urllib.parse import urljoin
 import urllib.request
 from urllib.request import Request as URequest, urlopen
 from urllib.error import URLError, HTTPError as UHTTPError
@@ -45,6 +44,11 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
             "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
         })
+
+        # Add auth cookies to request headers
+        if context.auth_cookies:
+            cookie_str = "; ".join(f"{k}={v}" for k, v in context.auth_cookies.items())
+            req.add_header("Cookie", cookie_str)
 
         _proxy = get_proxy()
         if _proxy:
@@ -79,32 +83,43 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
 
         html = raw_bytes.decode(charset, errors="replace")
 
+        # Use production parser functions for full extraction (consistent with static_requests)
+        from parser import (
+            parse_headings, parse_images as _parse_images,
+            parse_links as _parse_links, parse_forms,
+            parse_json_ld, parse_opengraph, parse_semantic_zones,
+            parse_main_content,
+        )
+        from normalizer import _detect_language_from_html
+
         soup = BeautifulSoup(html, "lxml")
         title_tag = soup.find("title")
         title_text = title_tag.get_text(strip=True) if title_tag else ""
 
-        headings = []
-        for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
-            t = " ".join(tag.get_text().split())
-            if t:
-                headings.append({"level": int(tag.name[1]), "text": t})
-
+        headings = parse_headings(soup)
         paragraphs = [" ".join(p.get_text().split()) for p in soup.find_all("p")
                       if p.get_text(strip=True)]
+        links = _parse_links(soup, url)
+        images = _parse_images(soup, url)
+        forms = parse_forms(soup)
+        json_ld = parse_json_ld(soup)
+        opengraph = parse_opengraph(soup)
+        semantic_zones = parse_semantic_zones(soup, url)
+        language = _detect_language_from_html(html[:4096])
+        main_content = parse_main_content(soup)
 
-        links = []
-        seen: set[str] = set()
-        for a in soup.find_all("a", href=True):
-            href = str(a["href"]).strip()
-            if href.startswith(("#", "javascript:", "mailto:", "tel:")):
-                continue
-            full = urljoin(url, href)
-            if full not in seen:
-                seen.add(full)
-                links.append({"text": " ".join(a.get_text().split()), "href": full})
+        meta_tags = []
+        for tag in soup.find_all("meta"):
+            entry: dict = {}
+            for attr in ("name", "property", "http-equiv", "charset", "content"):
+                val = tag.get(attr)
+                if val:
+                    entry[attr] = str(val)
+            if entry:
+                meta_tags.append(entry)
 
         body = soup.find("body")
-        plain_text = " ".join(body.get_text().split()) if body else ""
+        plain_text = main_content or (" ".join(body.get_text().split()) if body else "")
 
         return EngineResult(
             engine_id=engine_id, engine_name=engine_name, url=url,
@@ -114,7 +129,11 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
             content_type=ct,
             elapsed_s=time.time() - start,
             data={"title": title_text, "headings": headings,
-                  "paragraphs": paragraphs, "links": links},
+                  "paragraphs": paragraphs, "links": links,
+                  "images": images, "forms": forms,
+                  "json_ld": json_ld, "opengraph": opengraph,
+                  "semantic_zones": semantic_zones, "language": language,
+                  "meta_tags": meta_tags},
         )
 
     except UHTTPError as exc:

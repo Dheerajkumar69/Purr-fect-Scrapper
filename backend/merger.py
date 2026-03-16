@@ -62,6 +62,8 @@ _ENGINE_WEIGHTS: dict[str, float] = {
     "file_data":           0.65,
     "visual_ocr":          0.60,   # screenshot OCR — noisy
     "ai_assist":           0.50,   # LLM guess — useful but uncertain
+    "endpoint_probe":      0.75,   # active API/endpoint detection
+    "secret_scan":         0.85,   # credential leakage detection (high precision)
 }
 
 _DEFAULT_WEIGHT = 0.70  # fallback for unknown engine IDs
@@ -89,6 +91,8 @@ _FIELD_IMPORTANCE: dict[str, float] = {
     "language":        0.03,
     "page_type":       0.02,
     "keywords":        0.02,
+    "detected_endpoints": 0.05,
+    "leaked_secrets":  0.05,
 }
 # All other fields:
 _FIELD_IMPORTANCE_DEFAULT = 0.01
@@ -100,8 +104,10 @@ _FIELD_IMPORTANCE_DEFAULT = 0.01
 
 _PREFER_LONGEST   = {"main_content", "description"}
 _UNION_FIELDS     = {"links", "images", "headings", "tables", "forms", "lists",
-                     "keywords", "detected_api_data"}
-_MERGE_DICT_FIELDS = {"structured_data", "meta_tags", "semantic_zones", "entities"}
+                     "keywords", "detected_api_data", "detected_endpoints",
+                     "leaked_secrets"}
+_MERGE_DICT_FIELDS = {"structured_data", "meta_tags", "semantic_zones", "entities",
+                      "endpoint_probe_summary", "secret_scan_summary"}
 _VOTE_FIELDS      = {"title", "canonical_url", "language", "page_type"}
 
 
@@ -718,7 +724,8 @@ def merge(normalized_results: list[dict]) -> dict:
     _record_confidence("headings", _head_agr, merged["headings"])
 
     # Generic list fields
-    for field in ["tables", "forms", "lists", "keywords", "detected_api_data"]:
+    for field in ["tables", "forms", "lists", "keywords", "detected_api_data",
+                  "detected_endpoints", "leaked_secrets"]:
         all_lists = [r.get(field) or [] for r in normalized_results if r.get("_success")]
         merged[field], _agr = _union_generic(all_lists, all_engine_ids)
         engine_contributions[field] = [r["engine_id"] for r in normalized_results
@@ -732,6 +739,19 @@ def merge(normalized_results: list[dict]) -> dict:
         engine_contributions[field] = [r["engine_id"] for r in normalized_results
                                        if r.get("_success") and r.get(field)]
         _record_confidence(field, _agr, merged[field])
+
+    # ── CRAWL DISCOVERY PASSTHROUGH ────────────────────────────────────────────
+    # pages, internal_links, external_links are produced only by crawl_discovery.
+    # They are carried through directly (no cross-engine voting needed).
+    for _cd_r in normalized_results:
+        if _cd_r.get("engine_id") == "crawl_discovery" and _cd_r.get("_success"):
+            if _cd_r.get("pages"):
+                merged["pages"] = _cd_r["pages"]
+            if _cd_r.get("internal_links"):
+                merged["internal_links"] = _cd_r["internal_links"]
+            if _cd_r.get("external_links"):
+                merged["external_links"] = _cd_r["external_links"]
+            break
 
     # ── GLOBAL CONFIDENCE SCORE (importance-weighted) ─────────────────────────
     if successful_engines == 0:

@@ -28,8 +28,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
-_MAX_PAGES_DEFAULT = 500  # Fallback ceiling when context does not carry max_pages
-# No _MAX_DEPTH constant — the engine honours context.depth without capping it
+_MAX_PAGES_DEFAULT = 500
+_CHECKPOINT_EVERY = 25  # save BFS state every N pages
+
+try:
+    from crawl_checkpoint import (
+        CrawlCheckpoint, CrawlDelayThrottle,
+        discover_rss_urls, resolve_canonical,
+    )
+    _CHECKPOINT_AVAILABLE = True
+except ImportError:
+    _CHECKPOINT_AVAILABLE = False
+    CrawlCheckpoint = None  # type: ignore[assignment,misc]
+    CrawlDelayThrottle = None  # type: ignore[assignment,misc]
+    def discover_rss_urls(*a, **kw): return []  # type: ignore[misc]
+    def resolve_canonical(*a, **kw): return None  # type: ignore[misc]
 
 # Query parameters that convey no page identity — strip before deduplication
 _STRIP_PARAMS = frozenset({
@@ -117,7 +130,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
 
     start = time.time()
     engine_id = "crawl_discovery"
-    engine_name = "Crawl Discovery (BFS spider + sitemap)"
+    engine_name = "Crawl Discovery (BFS spider + sitemap + resume)"
 
     warnings: list[str] = []
     max_depth = context.depth
@@ -148,7 +161,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
         try:
             rp.read()
         except Exception:
-            rp = None  # robots.txt unreachable → allow all
+            rp = None
         user_agent = headers.get("User-Agent", "*")
 
         def _robots_allowed(u: str) -> bool:
@@ -156,18 +169,72 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
                 return True
             return rp.can_fetch(user_agent, u)
 
-        # Priority queue: (priority_score, counter, url, depth)
-        # counter breaks ties deterministically (pure floats can collide)
+        # --- Crawl-delay throttle (honours robots.txt Crawl-delay) ---
+        throttle = CrawlDelayThrottle(default_delay_s=1.0) if CrawlDelayThrottle else None
+        if throttle and rp is not None:
+            _parsed_netloc = urlparse(url).netloc
+            try:
+                _crawl_delay = rp.crawl_delay(user_agent) or rp.crawl_delay("*")
+                if _crawl_delay:
+                    throttle.set_delay(_parsed_netloc, float(_crawl_delay))
+                    logger.info("[%s] crawl_discovery: Crawl-delay=%.1fs for %s",
+                                context.job_id, float(_crawl_delay), _parsed_netloc)
+            except Exception:
+                pass
+
+        # --- Checkpoint: try to resume a previous crawl ---
+        _chk_db = None
+        checkpoint = None
+        if CrawlCheckpoint is not None:
+            try:
+                _output_dir = getattr(context, "raw_output_dir", "/tmp")
+                _chk_db_path = os.path.join(os.path.dirname(_output_dir), "crawl_checkpoints.sqlite")
+                checkpoint = CrawlCheckpoint(_chk_db_path, context.job_id, url)
+                _chk_state = checkpoint.load()
+            except Exception as _ce:
+                logger.warning("[%s] CrawlCheckpoint init failed: %s", context.job_id, _ce)
+                checkpoint = None
+                _chk_state = None
+        else:
+            _chk_state = None
+
         _counter = 0
-        heap: list[tuple[float, int, str, int]] = []
-        _seed = _normalize_url(url)
-        heapq.heappush(heap, (_url_priority(_seed, 0), _counter, _seed, 0))
-        visited: set[str] = set()
+        if _chk_state:
+            heap = _chk_state["heap"]
+            visited = _chk_state["visited"]
+            pages_count_offset = _chk_state["pages_count"]
+            logger.info("[%s] crawl_discovery: Resuming from checkpoint — "
+                        "%d visited, %d in frontier",
+                        context.job_id, len(visited), len(heap))
+        else:
+            heap: list = []
+            visited: set = set()
+            pages_count_offset = 0
+            _seed = _normalize_url(url)
+            heapq.heappush(heap, (_url_priority(_seed, 0), _counter, _seed, 0))
+
         pages: list[dict] = []
         all_links: list[dict] = []
         seen_links: set[str] = set()
+        # canonical_map: non-canonical URL -> canonical URL
+        canonical_visited: set[str] = set(visited)  # includes canonicals for dedup
 
-        while heap and len(pages) < max_pages:
+        # --- Seed frontier with RSS/Atom feed URLs ---
+        if not _chk_state:  # only seed RSS on fresh crawl
+            try:
+                rss_urls = discover_rss_urls(url, headers, context.timeout, max_urls=100)
+                for rss_url in rss_urls:
+                    norm_rss = _normalize_url(rss_url)
+                    if _same_origin(url, norm_rss) and norm_rss not in visited:
+                        _counter += 1
+                        heapq.heappush(heap, (_url_priority(norm_rss, 1), _counter, norm_rss, 1))
+                if rss_urls:
+                    logger.info("[%s] crawl_discovery: Seeded %d URLs from RSS",
+                                context.job_id, len(rss_urls))
+            except Exception as _rsse:
+                logger.debug("[%s] RSS seeding failed: %s", context.job_id, _rsse)
+
+        while heap and len(pages) + pages_count_offset < max_pages:
             priority, _, current_url, depth = heapq.heappop(heap)
             if current_url in visited:
                 continue
@@ -176,10 +243,12 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
                 continue
             visited.add(current_url)
 
+            # Apply crawl-delay before fetching
+            if throttle:
+                throttle.wait(current_url)
+
             try:
                 resp = fetch(current_url)
-                # Fast-fail: skip 4xx / 5xx pages and log them rather than
-                # propagating errors or following broken links.
                 if resp.status_code == 404:
                     warnings.append(f"404 Not Found (skipped): {current_url}")
                     continue
@@ -192,6 +261,18 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
                     continue
 
                 soup = BeautifulSoup(resp.text, "lxml")
+
+                # --- Canonical URL deduplication ---
+                canonical = resolve_canonical(current_url, resp.text)
+                if canonical and canonical != current_url:
+                    norm_canonical = _normalize_url(canonical)
+                    if norm_canonical in canonical_visited:
+                        # This page is a duplicate of its canonical; skip extraction
+                        visited.add(norm_canonical)
+                        continue
+                    canonical_visited.add(norm_canonical)
+                    canonical_visited.add(_normalize_url(current_url))
+
                 title_tag = soup.find("title")
                 title_text = title_tag.get_text(strip=True) if title_tag else ""
 
@@ -208,6 +289,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
                     "description": str(desc),
                     "depth": depth,
                     "status": resp.status_code,
+                    "canonical": canonical or current_url,
                 }
                 pages.append(page_info)
                 logger.debug("[%s] Crawled [d=%d]: %s | %s", context.job_id, depth,
@@ -229,7 +311,9 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
                                 "text": " ".join(a.get_text().split()),
                                 "internal": _same_origin(url, full),
                             })
-                        if _same_origin(url, full) and full not in visited:
+                        if (_same_origin(url, full)
+                                and full not in visited
+                                and full not in canonical_visited):
                             _counter += 1
                             heapq.heappush(heap, (_url_priority(full, depth + 1),
                                                   _counter, full, depth + 1))
@@ -237,6 +321,20 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
             except Exception as exc:
                 warnings.append(f"Crawl error at {current_url}: {exc}")
                 continue
+
+            # Periodic checkpoint save
+            if checkpoint and len(pages) % _CHECKPOINT_EVERY == 0 and len(pages) > 0:
+                try:
+                    checkpoint.save(heap, visited, len(pages) + pages_count_offset)
+                except Exception as _cse:
+                    logger.warning("[%s] Checkpoint save failed: %s", context.job_id, _cse)
+
+        # Final checkpoint: mark complete
+        if checkpoint:
+            try:
+                checkpoint.mark_complete()
+            except Exception:
+                pass
 
         internal_links = [l for l in all_links if l["internal"]]
         external_links = [l for l in all_links if not l["internal"]]
