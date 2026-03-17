@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
@@ -34,13 +35,13 @@ def _is_transient(error_msg: str | None) -> bool:
 
 
 def retry_engine_run(
-    run_fn: Callable[..., "EngineResult"],
+    run_fn: Callable[..., EngineResult],
     url: str,
-    context: "EngineContext",
+    context: EngineContext,
     *,
     max_retries: int = 2,
     backoff_base: float = 1.0,
-) -> "EngineResult":
+) -> EngineResult:
     """
     Execute *run_fn(url, context)* with retry on transient failures.
 
@@ -62,7 +63,7 @@ def retry_engine_run(
     EngineResult
         The result from the best attempt.
     """
-    last_result: "EngineResult | None" = None
+    last_result: EngineResult | None = None
 
     for attempt in range(1 + max_retries):
         try:

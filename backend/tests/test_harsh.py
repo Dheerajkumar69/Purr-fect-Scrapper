@@ -22,11 +22,16 @@ Covers all 18 categories:
   18. Chaos (corrupt HTML, mid-stream failures, resource exhaustion)
 """
 
-import os, sys, json, time, logging, tempfile, threading
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import json
+import logging
+import os
+import sys
+import tempfile
+import threading
+import time
+from unittest.mock import MagicMock, patch
 
 import pytest
-from unittest.mock import MagicMock, patch, call
 from fastapi.testclient import TestClient
 
 from main import app
@@ -57,7 +62,7 @@ def _v2(extra: dict = {}, *, url="http://info.cern.ch"):
 
 @pytest.fixture(autouse=True)
 def _allow_robots():
-    with patch("main.check_robots_txt", return_value=(True, "")):
+    with patch("routes.scrape.check_robots_txt", return_value=(True, "")):
         yield
 
 
@@ -65,9 +70,9 @@ def _allow_robots():
 def _disable_rate_limit():
     """Disable slowapi rate limiting for the entire test session."""
     import main as _main
-    _main.limiter.enabled = False
+    _main.deps.limiter.enabled = False
     yield
-    _main.limiter.enabled = True
+    _main.deps.limiter.enabled = True
 
 
 # =============================================================================
@@ -80,28 +85,28 @@ class TestInputValidation:
     # ── URL format ────────────────────────────────────────────────────────────
 
     def test_valid_https(self):
-        with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
             r = client.post("/scrape", json=_scrape(url="https://example.com"))
         assert r.status_code == 200
 
     def test_http_url_accepted(self):
-        with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
             r = client.post("/scrape", json=_scrape(url="http://example.com"))
         assert r.status_code == 200
 
     def test_url_with_query_params(self):
-        with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
             r = client.post("/scrape", json=_scrape(url="https://example.com/page?q=hello&page=2"))
         assert r.status_code == 200
 
     def test_url_with_fragment_accepted(self):
         """Fragments are client-side only; validate_url must not reject them."""
-        with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
             r = client.post("/scrape", json=_scrape(url="https://example.com/page#section"))
         assert r.status_code == 200
 
     def test_trailing_slash_accepted(self):
-        with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
             r = client.post("/scrape", json=_scrape(url="https://example.com/"))
         assert r.status_code == 200
 
@@ -149,18 +154,18 @@ class TestInputValidation:
         assert r.status_code == 422
 
     def test_empty_options_accepted(self):
-        with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
             r = client.post("/scrape", json=_scrape(options=[]))
         assert r.status_code == 200
         assert r.json()["data"] == {}
 
     def test_null_custom_css_accepted(self):
-        with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
             r = client.post("/scrape", json={**_scrape(), "custom_css": None})
         assert r.status_code == 200
 
     def test_null_custom_xpath_accepted(self):
-        with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
             r = client.post("/scrape", json={**_scrape(), "custom_xpath": None})
         assert r.status_code == 200
 
@@ -193,42 +198,42 @@ class TestInputValidation:
 
 class TestRobotsTxt:
     def test_disallowed_path_returns_403(self):
-        with patch("main.check_robots_txt", return_value=(False, "robots.txt disallows this URL")):
+        with patch("routes.scrape.check_robots_txt", return_value=(False, "robots.txt disallows this URL")):
             r = client.post("/scrape", json=_scrape())
         assert r.status_code == 403
         assert "robots" in r.json()["detail"].lower()
 
     def test_missing_robots_continues(self):
         """404 on robots.txt → allowed (treated as no restrictions)."""
-        with patch("main.check_robots_txt", return_value=(True, "")):
-            with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.check_robots_txt", return_value=(True, "")):
+            with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
                 r = client.post("/scrape", json=_scrape())
         assert r.status_code == 200
 
     def test_unreachable_robots_emits_warning(self):
         warn = "robots.txt fetch timed out after 5s; proceeding."
-        with patch("main.check_robots_txt", return_value=(True, warn)):
-            with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.check_robots_txt", return_value=(True, warn)):
+            with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
                 r = client.post("/scrape", json=_scrape())
         assert r.status_code == 200
         assert warn in r.json()["warnings"]
 
     def test_respect_robots_false_skips_check(self):
-        with patch("main.check_robots_txt", return_value=(False, "blocked")) as mock_rb:
-            with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.check_robots_txt", return_value=(False, "blocked")) as mock_rb:
+            with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
                 r = client.post("/scrape", json={**_scrape(), "respect_robots": False})
         assert r.status_code == 200
         mock_rb.assert_not_called()
 
     def test_partial_restriction_blocks_targeted_path(self):
         """Disallow for /admin but not /. Path hit is /admin."""
-        with patch("main.check_robots_txt", return_value=(False, "robots.txt disallows /admin")):
+        with patch("routes.scrape.check_robots_txt", return_value=(False, "robots.txt disallows /admin")):
             r = client.post("/scrape", json=_scrape(url="https://example.com/admin"))
         assert r.status_code == 403
 
     def test_robots_error_reason_in_403_detail(self):
         reason = "robots.txt at https://example.com/robots.txt disallows crawling"
-        with patch("main.check_robots_txt", return_value=(False, reason)):
+        with patch("routes.scrape.check_robots_txt", return_value=(False, reason)):
             r = client.post("/scrape", json=_scrape())
         assert reason in r.json()["detail"]
 
@@ -378,7 +383,7 @@ class TestStaticUrllibEngine:
         mock_resp.url = url
         mock_resp.headers = MagicMock()
         mock_resp.headers.get = MagicMock(side_effect=lambda k, d="": "text/html; charset=utf-8" if k == "Content-Type" else d)
-        mock_resp.read.return_value = raw
+        mock_resp.read.side_effect = [raw, b""]
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
         with patch("engines.engine_static_urllib.urlopen", return_value=mock_resp):
@@ -391,7 +396,6 @@ class TestStaticUrllibEngine:
 
     def test_zero_external_deps(self):
         """Engine must work when requests/httpx are absent."""
-        import sys
         saved = sys.modules.copy()
         # Just verify the engine module itself doesn't import requests at module level
         import engines.engine_static_urllib as eng_mod
@@ -525,7 +529,6 @@ class TestLoginFlow:
 
     def test_no_credentials_engine_skips_login(self):
         """Without credentials, session_auth engine should either skip or fail gracefully."""
-        from engines import EngineContext
         from engines.engine_session_auth import run
         ctx = self._ctx(credentials={})
         with patch("playwright.sync_api.sync_playwright") as mock_pw:
@@ -580,9 +583,10 @@ class TestNavigationStability:
 
     def test_404_response_captured(self):
         """HTTP 404 causes raise_for_status to raise; engine must return success=False."""
+        import requests as rq
+
         from engines import EngineContext
         from engines.engine_static_requests import run
-        import requests as rq
         ctx = EngineContext(job_id="test", url="https://example.com/gone", timeout=10)
         mr = MagicMock()
         mr.status_code = 404
@@ -600,9 +604,10 @@ class TestNavigationStability:
 
     def test_500_server_error_captured(self):
         """HTTP 500 causes raise_for_status to raise; engine must return success=False."""
+        import requests as rq
+
         from engines import EngineContext
         from engines.engine_static_requests import run
-        import requests as rq
         ctx = EngineContext(job_id="test", url="https://example.com/broken", timeout=10)
         mr = MagicMock()
         mr.status_code = 500
@@ -619,9 +624,10 @@ class TestNavigationStability:
         assert r.error is not None
 
     def test_connection_error_returns_failed_result(self):
+        import requests as rq
+
         from engines import EngineContext
         from engines.engine_static_requests import run
-        import requests as rq
         ctx = EngineContext(job_id="test", url="https://unreachable.invalid", timeout=5)
         with patch("requests.get", side_effect=rq.exceptions.ConnectionError("refused")):
             r = run("https://unreachable.invalid", ctx)
@@ -630,9 +636,10 @@ class TestNavigationStability:
         assert r.elapsed_s >= 0
 
     def test_timeout_error_returns_failed_result(self):
+        import requests as rq
+
         from engines import EngineContext
         from engines.engine_static_requests import run
-        import requests as rq
         ctx = EngineContext(job_id="test", url="https://slow.invalid", timeout=1)
         with patch("requests.get", side_effect=rq.exceptions.Timeout("timed out")):
             r = run("https://slow.invalid", ctx)
@@ -661,8 +668,8 @@ class TestDataAccuracy:
         )
 
     def test_majority_title_wins(self):
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         results = [
             self._make_result("e1", "Real Title"),
             self._make_result("e2", "Real Title"),
@@ -673,8 +680,8 @@ class TestDataAccuracy:
         assert merged["title"] == "Real Title"
 
     def test_conflicting_title_detected(self):
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         results = [
             self._make_result("e1", "Title A"),
             self._make_result("e2", "Title B"),
@@ -684,9 +691,9 @@ class TestDataAccuracy:
         assert "title" in merged.get("conflicting_fields", [])
 
     def test_duplicate_links_removed(self):
-        from normalizer import normalize
-        from merger import merge
         from engines import EngineResult
+        from merger import merge
+        from normalizer import normalize
         link = {"href": "https://example.com/page", "text": "Page"}
         r1 = EngineResult(engine_id="e1", engine_name="e1", url="https://example.com",
                           success=True, data={"title": "T", "paragraphs": [], "links": [link, link],
@@ -702,8 +709,8 @@ class TestDataAccuracy:
         assert hrefs.count("https://example.com/page") == 1
 
     def test_failed_engine_excluded_from_merge(self):
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         results = [
             self._make_result("e1", "Good Title", success=True),
             self._make_result("e2", "Bad Title", success=False),
@@ -714,8 +721,8 @@ class TestDataAccuracy:
         assert merged["title"] == "Good Title"
 
     def test_confidence_above_zero_when_engines_succeed(self):
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         results = [self._make_result("e1", "T", success=True),
                    self._make_result("e2", "T", success=True)]
         normalized = [normalize(r) for r in results]
@@ -723,8 +730,8 @@ class TestDataAccuracy:
         assert merged["confidence_score"] > 0
 
     def test_confidence_zero_when_all_fail(self):
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         results = [self._make_result("e1", "T", success=False),
                    self._make_result("e2", "T", success=False)]
         normalized = [normalize(r) for r in results]
@@ -741,14 +748,14 @@ class TestPerformance:
         """10 sequential static scrapes must all return 200."""
         results = []
         for i in range(10):
-            with patch("main.auto_scrape", return_value=_mock_result()):
+            with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
                 r = client.post("/scrape", json=_scrape(url=f"https://example.com/page{i}"))
             results.append(r.status_code)
         assert all(s == 200 for s in results)
 
     def test_response_time_under_threshold(self):
         """Mocked scrape (no real network) must respond within 2 seconds."""
-        with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
             start = time.time()
             r = client.post("/scrape", json=_scrape())
             elapsed = time.time() - start
@@ -759,7 +766,7 @@ class TestPerformance:
         """1 MB of valid HTML should be handled without OOM or exception."""
         big_body = "<p>" + "word " * 50_000 + "</p>"
         big_html = f"<html><head><title>Big</title></head><body>{big_body}</body></html>"
-        with patch("main.auto_scrape", return_value=_mock_result(html=big_html)):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html=big_html)):
             r = client.post("/scrape", json=_scrape(options=["title", "paragraphs"]))
         assert r.status_code == 200
 
@@ -771,7 +778,7 @@ class TestPerformance:
         def do_request(key, url):
             try:
                 mock = _mock_result(html=f"<html><head><title>{key}</title></head><body></body></html>")
-                with patch("main.auto_scrape", return_value=mock):
+                with patch("routes.scrape.auto_scrape", return_value=mock):
                     r = client.post("/scrape", json=_scrape(url=url))
                 responses[key] = r.json()
             except Exception as exc:
@@ -794,17 +801,17 @@ class TestPerformance:
 
 class TestFailureRecovery:
     def test_network_drop_returns_502(self):
-        with patch("main.auto_scrape", side_effect=RuntimeError("network drop")):
+        with patch("routes.scrape.auto_scrape", side_effect=RuntimeError("network drop")):
             r = client.post("/scrape", json=_scrape())
         assert r.status_code in (500, 502)
 
     def test_generic_exception_returns_502(self):
-        with patch("main.auto_scrape", side_effect=RuntimeError("boom")):
+        with patch("routes.scrape.auto_scrape", side_effect=RuntimeError("boom")):
             r = client.post("/scrape", json=_scrape())
         assert r.status_code in (500, 502)
 
     def test_value_error_returns_422(self):
-        with patch("main.auto_scrape", side_effect=ValueError("non-HTML content")):
+        with patch("routes.scrape.auto_scrape", side_effect=ValueError("non-HTML content")):
             r = client.post("/scrape", json=_scrape())
         assert r.status_code in (422, 400)
 
@@ -812,7 +819,6 @@ class TestFailureRecovery:
         """Hybrid engine must promote next engine when static returns < MIN text."""
         from engines import EngineContext, EngineResult
         from engines.engine_hybrid import run as hybrid_run
-        from engines.engine_static_requests import run as static_run
         ctx = EngineContext(job_id="test", url="https://spa.example.com", timeout=15,
                             initial_html="<html><body><div id='root'></div></body></html>")
 
@@ -835,9 +841,9 @@ class TestFailureRecovery:
         assert len(r.text or "") >= 200
 
     def test_all_engines_fail_merger_returns_zero_confidence(self):
-        from normalizer import normalize
-        from merger import merge
         from engines import EngineResult
+        from merger import merge
+        from normalizer import normalize
         failures = [
             EngineResult(engine_id=f"e{i}", engine_name="", url="https://x.com",
                          success=False, error="timeout", elapsed_s=5)
@@ -848,8 +854,8 @@ class TestFailureRecovery:
         assert merged["confidence_score"] == 0.0
 
     def test_parse_error_returns_500_not_crash(self):
-        with patch("main.auto_scrape", return_value=_mock_result()):
-            with patch("main.parse_all", side_effect=Exception("lxml segfault")):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
+            with patch("routes.scrape.parse_all", side_effect=Exception("lxml segfault")):
                 r = client.post("/scrape", json=_scrape())
         assert r.status_code in (500, 502)
 
@@ -864,12 +870,12 @@ class TestRateLimitAndPoliteness:
         assert r.status_code == 200
 
     def test_request_id_header_present(self):
-        with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
             r = client.post("/scrape", json=_scrape())
         assert "x-request-id" in r.headers
 
     def test_custom_request_id_echoed(self):
-        with patch("main.auto_scrape", return_value=_mock_result()):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
             r = client.post("/scrape", json=_scrape(),
                             headers={"X-Request-ID": "trace-abc-123"})
         assert r.headers.get("x-request-id") == "trace-abc-123"
@@ -898,7 +904,7 @@ class TestRateLimitAndPoliteness:
 # =============================================================================
 
 class TestEdgeContent:
-    def _parse(self, html: str, options: list = None):
+    def _parse(self, html: str, options: list | None = None):
         from parser import parse_all
         return parse_all(html, "https://example.com", options or ["tables", "lists", "forms"])
 
@@ -1093,7 +1099,7 @@ class TestSecurity:
     def test_script_injection_in_content_not_executed(self):
         """Scraped <script> tags must be in raw data but never evaluated."""
         evil_html = "<html><body><script>window._pwned=true</script><p>safe</p></body></html>"
-        with patch("main.auto_scrape", return_value=_mock_result(html=evil_html)):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html=evil_html)):
             r = client.post("/scrape", json=_scrape(options=["paragraphs"]))
         assert r.status_code == 200
         paras = " ".join(r.json()["data"].get("paragraphs", []))
@@ -1119,7 +1125,7 @@ class TestSecurity:
     def test_redirect_bomb_detected_by_connection_error(self):
         """Too many redirects → requests raises TooManyRedirects → 502 from API."""
         import requests as rq
-        with patch("main.auto_scrape", side_effect=rq.exceptions.TooManyRedirects("too many")):
+        with patch("routes.scrape.auto_scrape", side_effect=rq.exceptions.TooManyRedirects("too many")):
             r = client.post("/scrape", json=_scrape())
         assert r.status_code == 502
 
@@ -1146,14 +1152,14 @@ class TestSecurity:
 class TestLoggingAndObservability:
     def test_scrape_request_is_logged(self, caplog):
         with caplog.at_level(logging.INFO, logger="scraper.api"):
-            with patch("main.auto_scrape", return_value=_mock_result()):
+            with patch("routes.scrape.auto_scrape", return_value=_mock_result()):
                 client.post("/scrape", json=_scrape())
         assert any("scrape" in r.message.lower() or "url" in r.message.lower()
                    for r in caplog.records)
 
     def test_robots_block_logged(self, caplog):
         with caplog.at_level(logging.INFO):
-            with patch("main.check_robots_txt", return_value=(False, "robots blocked")):
+            with patch("routes.scrape.check_robots_txt", return_value=(False, "robots blocked")):
                 client.post("/scrape", json=_scrape())
         # 403 raised — at minimum there should be no suppressed Python traceback
         # (raise_server_exceptions=False means it's caught internally)
@@ -1186,8 +1192,8 @@ class TestLoggingAndObservability:
 
     def test_merger_engine_summary_in_output(self):
         from engines import EngineResult
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         r = EngineResult(engine_id="e1", engine_name="E1", url="https://x.com",
                          success=True, elapsed_s=1.1, status_code=200,
                          data={"title": "T", "paragraphs": [], "links": [],
@@ -1208,8 +1214,8 @@ class TestLoggingAndObservability:
 class TestReportGeneration:
     def _make_merged(self):
         from engines import EngineResult
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         r = EngineResult(
             engine_id="static_requests", engine_name="Static Requests",
             url="https://example.com", success=True, elapsed_s=0.5,
@@ -1271,7 +1277,7 @@ class TestReportGeneration:
             report_path = os.path.join(report_dir, f"{job_id}.json")
             with open(report_path, "w") as f:
                 json.dump({"job_id": job_id, "title": "Test"}, f)
-            with patch("main._OUTPUT_DIR", tmpdir):
+            with patch("dependencies.OUTPUT_DIR", tmpdir):
                 r = client.get(f"/reports/{job_id}")
         assert r.status_code == 200
         assert r.json()["job_id"] == job_id
@@ -1310,8 +1316,8 @@ class TestConsistency:
 
     def test_merger_is_deterministic(self):
         from engines import EngineResult
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         results = [
             EngineResult(engine_id=f"e{i}", engine_name=f"e{i}", url="https://x.com",
                          success=True, elapsed_s=0.1, status_code=200,
@@ -1328,8 +1334,8 @@ class TestConsistency:
 
     def test_confidence_stable_across_runs(self):
         from engines import EngineResult
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         scores = []
         for _ in range(5):
             r = EngineResult(engine_id="e", engine_name="e", url="https://x.com",
@@ -1352,25 +1358,25 @@ class TestConsistency:
 
 class TestChaos:
     def test_completely_empty_html(self):
-        with patch("main.auto_scrape", return_value=_mock_result(html="")):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html="")):
             r = client.post("/scrape", json=_scrape(options=["title", "paragraphs"]))
         assert r.status_code == 200
 
     def test_html_is_just_whitespace(self):
-        with patch("main.auto_scrape", return_value=_mock_result(html="   \n\t  ")):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html="   \n\t  ")):
             r = client.post("/scrape", json=_scrape(options=["title"]))
         assert r.status_code == 200
         assert r.json()["data"].get("title", "") == ""
 
     def test_html_with_null_bytes(self):
         html = "<html><head><title>Null\x00Byte</title></head><body>\x00</body></html>"
-        with patch("main.auto_scrape", return_value=_mock_result(html=html)):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html=html)):
             r = client.post("/scrape", json=_scrape())
         assert r.status_code == 200
 
     def test_html_with_only_script_tags(self):
         html = "<html><body><script>var x = 1;</script><script>var y = 2;</script></body></html>"
-        with patch("main.auto_scrape", return_value=_mock_result(html=html)):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html=html)):
             r = client.post("/scrape", json=_scrape(options=["paragraphs"]))
         assert r.status_code == 200
         assert r.json()["data"]["paragraphs"] == []
@@ -1378,7 +1384,7 @@ class TestChaos:
     def test_html_with_extremely_deep_nesting(self):
         deep = "<div>" * 200 + "<p>deep text</p>" + "</div>" * 200
         html = f"<html><body>{deep}</body></html>"
-        with patch("main.auto_scrape", return_value=_mock_result(html=html)):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html=html)):
             r = client.post("/scrape", json=_scrape(options=["paragraphs"]))
         assert r.status_code == 200
 
@@ -1399,8 +1405,8 @@ class TestChaos:
 
     def test_merger_with_single_failed_result(self):
         from engines import EngineResult
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         r = EngineResult(engine_id="e", engine_name="e", url="https://x.com",
                          success=False, error="total failure", elapsed_s=30)
         merged = merge([normalize(r)])
@@ -1437,7 +1443,7 @@ class TestChaos:
     def test_html_with_malicious_meta_redirect(self):
         """Meta refresh redirect in HTML must not cause infinite loop."""
         html = '<html><head><meta http-equiv="refresh" content="0;url=https://evil.com"/></head><body></body></html>'
-        with patch("main.auto_scrape", return_value=_mock_result(html=html)):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html=html)):
             r = client.post("/scrape", json=_scrape(options=["meta"]))
         assert r.status_code == 200
 
@@ -1531,7 +1537,7 @@ class TestProductionQuality:
             status_code=200, elapsed_s=0.1,
         )
         n = normalize(r)
-        assert n["page_type"] != "unknown", f"Expected page_type for homepage, got 'unknown'"
+        assert n["page_type"] != "unknown", "Expected page_type for homepage, got 'unknown'"
         assert n["page_type"] == "homepage"
 
     def test_page_type_article_from_og_type(self):
@@ -1572,8 +1578,9 @@ class TestProductionQuality:
 
     def test_main_content_excludes_navbar_text(self):
         """parse_main_content must NOT include navbar text in its output."""
-        from parser import parse_main_content
         from bs4 import BeautifulSoup
+
+        from parser import parse_main_content
         html = """<html><body>
           <nav>Home About Contact Login</nav>
           <main>
@@ -1595,8 +1602,9 @@ class TestProductionQuality:
 
     def test_main_content_uses_article_over_body(self):
         """Even without a <main> tag, <article> must be preferred over full body text."""
-        from parser import parse_main_content
         from bs4 import BeautifulSoup
+
+        from parser import parse_main_content
         html = """<html><body>
           <div class="navbar">Nav link 1 Nav link 2</div>
           <article>
@@ -1616,7 +1624,7 @@ class TestProductionQuality:
           <nav>Nav</nav>
           <main><p>Real content paragraph here.</p></main>
         </body></html>"""
-        with patch("main.auto_scrape", return_value=_mock_result(html=html)):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html=html)):
             r = client.post("/scrape", json=_scrape(options=["main_content"]))
         assert r.status_code == 200
         assert "main_content" in r.json()["data"]
@@ -1637,8 +1645,9 @@ class TestProductionQuality:
 
     def test_semantic_zones_parser_detects_nav(self):
         """parse_semantic_zones must find <nav> as 'navbar' zone."""
-        from parser import parse_semantic_zones
         from bs4 import BeautifulSoup
+
+        from parser import parse_semantic_zones
         html = """<html><body>
           <nav><a href="/">Home</a><a href="/about">About</a></nav>
           <main><p>Content</p></main>
@@ -1651,8 +1660,9 @@ class TestProductionQuality:
 
     def test_semantic_zones_parser_detects_content(self):
         """parse_semantic_zones must find <main> as 'content' zone."""
-        from parser import parse_semantic_zones
         from bs4 import BeautifulSoup
+
+        from parser import parse_semantic_zones
         html = """<html><body>
           <main><p>Main content here</p></main>
         </body></html>"""
@@ -1662,8 +1672,9 @@ class TestProductionQuality:
 
     def test_semantic_zones_parser_detects_footer(self):
         """parse_semantic_zones must find <footer> as 'footer' zone."""
-        from parser import parse_semantic_zones
         from bs4 import BeautifulSoup
+
+        from parser import parse_semantic_zones
         html = """<html><body>
           <footer><p>Copyright 2025</p></footer>
         </body></html>"""
@@ -1677,7 +1688,7 @@ class TestProductionQuality:
           <nav><a href="/">Home</a></nav>
           <main><p>Content</p></main>
         </body></html>"""
-        with patch("main.auto_scrape", return_value=_mock_result(html=html)):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html=html)):
             r = client.post("/scrape", json=_scrape(options=["semantic_zones"]))
         assert r.status_code == 200
         assert "semantic_zones" in r.json()["data"]
@@ -1686,8 +1697,9 @@ class TestProductionQuality:
 
     def test_links_button_data_href_collected(self):
         """parse_links must collect button[data-href] links."""
-        from parser import parse_links
         from bs4 import BeautifulSoup
+
+        from parser import parse_links
         html = """<html><body>
           <a href="/page1">Link 1</a>
           <button data-href="/page2">Click me</button>
@@ -1702,8 +1714,9 @@ class TestProductionQuality:
 
     def test_links_onclick_url_collected(self):
         """parse_links must extract onclick='window.location=...' URLs."""
-        from parser import parse_links
         from bs4 import BeautifulSoup
+
+        from parser import parse_links
         html = """<html><body>
           <span onclick="window.location='/dashboard'">Dashboard</span>
           <div onclick="location.href='/profile'">Profile</div>
@@ -1718,8 +1731,9 @@ class TestProductionQuality:
 
     def test_forms_detects_aria_role_form(self):
         """parse_forms must detect div[role='form'] containers."""
-        from parser import parse_forms
         from bs4 import BeautifulSoup
+
+        from parser import parse_forms
         html = """<html><body>
           <div role="form" id="search-modal">
             <input type="text" name="query" placeholder="Search..."/>
@@ -1734,8 +1748,9 @@ class TestProductionQuality:
 
     def test_forms_detects_bare_inputs_outside_form(self):
         """parse_forms must detect bare <input> elements outside <form> tags."""
-        from parser import parse_forms
         from bs4 import BeautifulSoup
+
+        from parser import parse_forms
         html = """<html><body>
           <div class="search-bar">
             <input type="text" name="q" id="search-input" placeholder="Search site..."/>
@@ -1749,8 +1764,9 @@ class TestProductionQuality:
 
     def test_forms_detects_explicit_form_tag(self):
         """Standard <form> tags must still be detected correctly with type='html_form'."""
-        from parser import parse_forms
         from bs4 import BeautifulSoup
+
+        from parser import parse_forms
         html = """<html><body>
           <form action="/login" method="POST">
             <input type="text" name="username"/>
@@ -1772,8 +1788,9 @@ class TestProductionQuality:
 
     def test_images_picture_source_srcset(self):
         """parse_images must extract src from <picture><source srcset>."""
-        from parser import parse_images
         from bs4 import BeautifulSoup
+
+        from parser import parse_images
         html = """<html><body>
           <picture>
             <source srcset="/img/photo-800w.jpg 800w, /img/photo-400w.jpg 400w" type="image/jpeg"/>
@@ -1789,8 +1806,9 @@ class TestProductionQuality:
 
     def test_images_data_lazy_src_extracted(self):
         """parse_images must handle data-lazy-src attribute."""
-        from parser import parse_images
         from bs4 import BeautifulSoup
+
+        from parser import parse_images
         html = """<html><body>
           <img data-lazy-src="/img/lazy-loaded.jpg" alt="Lazy image"/>
         </body></html>"""
@@ -1802,8 +1820,9 @@ class TestProductionQuality:
 
     def test_images_data_original_extracted(self):
         """parse_images must handle data-original attribute (common lazy pattern)."""
-        from parser import parse_images
         from bs4 import BeautifulSoup
+
+        from parser import parse_images
         html = """<html><body>
           <img data-original="/img/original.webp" alt="Original"/>
         </body></html>"""
@@ -1823,7 +1842,7 @@ class TestProductionQuality:
              "contactPoint": {"@type": "ContactPoint", "telephone": "+1-800-555-0100"}}
           </script>
         </head><body></body></html>"""
-        with patch("main.auto_scrape", return_value=_mock_result(html=html)):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html=html)):
             r = client.post("/scrape", json=_scrape(options=["json_ld"]))
         assert r.status_code == 200
         json_ld = r.json()["data"].get("json_ld", [])
@@ -1832,8 +1851,9 @@ class TestProductionQuality:
 
     def test_json_ld_parser_extracts_nested_schema(self):
         """parse_json_ld must extract all @type objects from JSONLD."""
-        from parser import parse_json_ld
         from bs4 import BeautifulSoup
+
+        from parser import parse_json_ld
         html = """<html><head>
           <script type="application/ld+json">
             {"@context": "https://schema.org", "@type": "WebSite",
@@ -1858,7 +1878,7 @@ class TestProductionQuality:
           <meta property="og:description" content="OG Description"/>
           <meta property="og:type" content="website"/>
         </head><body></body></html>"""
-        with patch("main.auto_scrape", return_value=_mock_result(html=html)):
+        with patch("routes.scrape.auto_scrape", return_value=_mock_result(html=html)):
             r = client.post("/scrape", json=_scrape(options=["opengraph"]))
         assert r.status_code == 200
         og = r.json()["data"].get("opengraph", {})
@@ -1869,8 +1889,9 @@ class TestProductionQuality:
 
     def test_headings_deduplicated_in_parser(self):
         """parse_headings must deduplicate carousel/animation clone duplicates."""
-        from parser import parse_headings
         from bs4 import BeautifulSoup
+
+        from parser import parse_headings
         # Simulates Bootstrap carousel where same heading text appears in
         # visible + hidden clone nodes
         html = """<html><body>
@@ -1957,8 +1978,8 @@ class TestProductionQuality:
         html[lang] extraction from _raw_html.
         """
         from engines import EngineResult
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         html = '<html lang="es"><head><title>T</title></head><body><p>hola</p></body></html>'
         results = []
         for i in range(2):
@@ -1981,8 +2002,8 @@ class TestProductionQuality:
         page_type='homepage' for a root URL.
         """
         from engines import EngineResult
-        from normalizer import normalize
         from merger import merge
+        from normalizer import normalize
         results = []
         for i in range(2):
             r = EngineResult(engine_id=f"e{i}", engine_name=f"e{i}",
@@ -2052,7 +2073,7 @@ class TestConfidenceSystem:
     # ------------------------------------------------------------------
 
     def test_engine_weights_table_present(self):
-        from merger import _ENGINE_WEIGHTS, _engine_weight
+        from merger import _ENGINE_WEIGHTS
         assert "structured_metadata" in _ENGINE_WEIGHTS
         assert "visual_ocr" in _ENGINE_WEIGHTS
         assert "ai_assist" in _ENGINE_WEIGHTS
@@ -2279,7 +2300,7 @@ class TestConfidenceSystem:
         assert r < 1.0
 
     def test_reliability_penalty_capped(self):
-        from merger import _extraction_reliability, _MAX_WARNING_PENALTY
+        from merger import _MAX_WARNING_PENALTY, _extraction_reliability
         # Many bad warnings should not drive reliability below (base × (1-cap))
         many_bad = [{"_success": True, "_warnings": ["timeout"] * 20}]
         r = _extraction_reliability(many_bad)
@@ -2326,7 +2347,7 @@ class TestConfidenceSystem:
 
     def test_confidence_score_is_importance_weighted(self):
         """Global confidence must be a weighted average, not a simple average."""
-        from merger import merge, _FIELD_IMPORTANCE
+        from merger import _FIELD_IMPORTANCE, merge
         r = self._make_result("static_requests")
         merged = merge([r])
         # Verify that confidence_score is within valid range

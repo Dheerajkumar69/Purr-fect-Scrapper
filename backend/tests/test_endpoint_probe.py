@@ -16,45 +16,14 @@ Coverage:
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import json
-import os
-import sys
-from typing import Any, Optional
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Ensure backend/ is on sys.path so the real `engines` package is importable
-_BACKEND = os.path.join(os.path.dirname(__file__), "..")
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
-
-# ---------------------------------------------------------------------------
-# Import the engine module under test using the real engines package
-# ---------------------------------------------------------------------------
-
-def _import_engine():
-    """Import engines.engine_endpoint_probe using the real engines package."""
-    mod_name = "engines.engine_endpoint_probe"
-    if mod_name in sys.modules:
-        return sys.modules[mod_name]
-    spec = importlib.util.spec_from_file_location(
-        mod_name,
-        os.path.join(_BACKEND, "engines", "engine_endpoint_probe.py"),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = mod   # register BEFORE exec to handle circular imports
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_ep = _import_engine()
-
-# Import real EngineContext from the engines package
-from engines import EngineContext  # noqa: E402 – must come after sys.path setup
-
+from engines import EngineContext
+from engines import engine_endpoint_probe as _ep
 
 # ---------------------------------------------------------------------------
 # Helpers

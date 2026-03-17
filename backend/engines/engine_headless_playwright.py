@@ -4,7 +4,13 @@ Engine 4 — Headless Browser Scraping via Playwright Chromium.
 Strategy: Launch a real Chromium browser headlessly, navigate to the URL,
 wait for network idle + extra settle time, then extract fully-rendered HTML.
 
-Tools: Playwright, playwright-stealth
+Enhanced with:
+  - Anti-detection fingerprint randomization (stealth_config)
+  - CAPTCHA detection and optional solving (captcha_handler)
+  - Proxy rotation support
+  - Skeleton/shimmer/loading wait strategies
+
+Tools: Playwright, playwright-stealth, stealth_config, captcha_handler
 Capabilities: JS execution, SPA rendering, button clicks, scroll, wait strategies.
 Best for: React/Vue/Angular SPAs, dashboards, JS-heavy pages.
 """
@@ -14,30 +20,32 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
 
-async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
-    from engines import EngineResult
+async def _run_async(url: str, context: EngineContext) -> EngineResult:
+    from urllib.parse import urlparse
+
     from bs4 import BeautifulSoup
-    from urllib.parse import urljoin
-    from utils import DEFAULT_HEADERS
+
+    from engines import EngineResult
+    from utils import get_proxy
 
     start = time.time()
     engine_id = "headless_playwright"
     engine_name = "Headless Browser (Playwright Chromium)"
+    warnings: list[str] = []
 
     try:
-        from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+        from playwright.async_api import TimeoutError as PWTimeout
+        from playwright.async_api import async_playwright
     except ImportError:
         return EngineResult(
             engine_id=engine_id, engine_name=engine_name, url=url,
@@ -45,26 +53,38 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
         )
 
     try:
+        # --- Stealth context options ---
+        from stealth_config import apply_stealth_scripts, get_stealth_context_options
+        stealth_opts = get_stealth_context_options()
+
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                      "--disable-extensions", "--disable-background-networking"],
-            )
+            launch_args = [
+                "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                "--disable-extensions", "--disable-background-networking",
+            ]
+
+            # --- Proxy support ---
+            _proxy = get_proxy()
+            launch_kwargs: dict = {
+                "headless": True,
+                "args": launch_args,
+            }
+
+            browser = await pw.chromium.launch(**launch_kwargs)
             try:
-                ctx_opts = dict(
-                    user_agent=DEFAULT_HEADERS["User-Agent"],
-                    java_script_enabled=True,
-                    accept_downloads=False,
-                )
-                if context.auth_cookies:
-                    ctx_opts["extra_http_headers"] = {}
+                ctx_opts = {
+                    **stealth_opts,
+                    "accept_downloads": False,
+                }
+
+                # Proxy at context level
+                if _proxy:
+                    ctx_opts["proxy"] = {"server": _proxy}
 
                 bctx = await browser.new_context(**ctx_opts)
 
                 # Inject saved cookies if available
                 if context.auth_cookies:
-                    from urllib.parse import urlparse
                     parsed = urlparse(url)
                     cookie_list = [
                         {"name": k, "value": v, "domain": parsed.hostname or "",
@@ -73,14 +93,16 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                     ]
                     await bctx.add_cookies(cookie_list)
 
+                # Inject storageState if available (from session_auth)
+                if getattr(context, "auth_storage_state_data", None):
+                    storage = context.auth_storage_state_data
+                    if storage.get("cookies"):
+                        await bctx.add_cookies(storage["cookies"])
+
                 page = await bctx.new_page()
 
-                # Stealth mode
-                try:
-                    from playwright_stealth import stealth_async
-                    await stealth_async(page)
-                except ImportError:
-                    pass
+                # Apply deep stealth scripts (WebGL, canvas, navigator spoofing)
+                await apply_stealth_scripts(page)
 
                 html = ""
                 status_code = 0
@@ -91,14 +113,43 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                 try:
                     nav_resp = await page.goto(
                         url,
-                        wait_until="networkidle",
+                        wait_until="domcontentloaded",
                         timeout=context.timeout * 1000,
                     )
+                    # Best-effort networkidle — don't hang on WebSocket/analytics sites
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        pass
                     status_code = nav_resp.status if nav_resp else 0
                     ct = nav_resp.headers.get("content-type", "") if nav_resp else ""
 
                     if status_code >= 400:
                         raise RuntimeError(f"HTTP {status_code} from headless browser")
+
+                    # --- CAPTCHA detection ---
+                    html = await page.content()
+                    try:
+                        from captcha_handler import detect_captcha, solve_captcha
+                        captcha_info = detect_captcha(html, url)
+                        if captcha_info.detected:
+                            logger.info(
+                                "[%s] CAPTCHA detected: %s",
+                                context.job_id, captcha_info.captcha_type,
+                            )
+                            solved = await solve_captcha(page, captcha_info)
+                            warnings.extend(captcha_info.warnings)
+                            if solved:
+                                warnings.append(
+                                    f"CAPTCHA ({captcha_info.captcha_type}) solved successfully"
+                                )
+                                html = await page.content()
+                            else:
+                                warnings.append(
+                                    f"CAPTCHA ({captcha_info.captcha_type}) detected but not solved"
+                                )
+                    except ImportError:
+                        pass
 
                     # Wait for skeleton loaders / shimmer / lazy placeholders to disappear
                     try:
@@ -162,7 +213,7 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
 
                         # Re-wait for any lazy/dynamic content to settle
                         try:
-                            await page.wait_for_load_state("networkidle", timeout=8000)
+                            await page.wait_for_load_state("networkidle", timeout=5000)
                         except Exception:
                             await page.wait_for_timeout(1500)
 
@@ -191,12 +242,19 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
 
         # Parse extracted HTML with production-grade parser functions
         soup = BeautifulSoup(html, "lxml")
-        from parser import (
-            parse_headings, parse_images, parse_links as _parse_links,
-            parse_forms, parse_json_ld, parse_opengraph,
-            parse_semantic_zones, parse_main_content,
-        )
         from normalizer import _detect_language_from_html
+        from parser import (
+            parse_forms,
+            parse_headings,
+            parse_images,
+            parse_json_ld,
+            parse_main_content,
+            parse_opengraph,
+            parse_semantic_zones,
+        )
+        from parser import (
+            parse_links as _parse_links,
+        )
 
         # --- Title: fallback chain ---
         title_text = ""
@@ -237,6 +295,7 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
             status_code=status_code, final_url=final_url, content_type=ct,
             elapsed_s=time.time() - start,
             screenshot_path=screenshot_path,
+            warnings=warnings,
             data={
                 "title": title_text,
                 "headings": headings,
@@ -256,10 +315,11 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
         return EngineResult(
             engine_id=engine_id, engine_name=engine_name, url=url,
             success=False, error=str(exc), elapsed_s=time.time() - start,
+            warnings=warnings,
         )
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
+def run(url: str, context: EngineContext) -> EngineResult:
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
         return _pool.submit(asyncio.run, _run_async(url, context)).result()

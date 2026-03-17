@@ -14,29 +14,29 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import sys
 import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
+from config import MAX_API_RESPONSE_BYTES
 
-async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
+
+async def _run_async(url: str, context: EngineContext) -> EngineResult:
     from engines import EngineResult
-    from utils import DEFAULT_HEADERS
+    from utils import get_proxy
 
     start = time.time()
     engine_id = "network_observe"
     engine_name = "Network Observation (Playwright API payload capture)"
 
     try:
-        from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+        from playwright.async_api import TimeoutError as PWTimeout
+        from playwright.async_api import async_playwright
     except ImportError:
         return EngineResult(
             engine_id=engine_id, engine_name=engine_name, url=url,
@@ -46,16 +46,24 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
     api_payloads: list[dict] = []
 
     try:
+        # --- Stealth context options ---
+        from stealth_config import apply_stealth_scripts, get_stealth_context_options
+        stealth_opts = get_stealth_context_options()
+
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
             )
             try:
-                bctx = await browser.new_context(
-                    user_agent=DEFAULT_HEADERS["User-Agent"],
-                    java_script_enabled=True,
-                )
+                ctx_opts = {**stealth_opts}
+
+                # Proxy support
+                _proxy = get_proxy()
+                if _proxy:
+                    ctx_opts["proxy"] = {"server": _proxy}
+
+                bctx = await browser.new_context(**ctx_opts)
 
                 if context.auth_cookies:
                     from urllib.parse import urlparse
@@ -66,13 +74,16 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                     ]
                     await bctx.add_cookies(cookie_list)
 
+                # Inject storageState if available
+                if getattr(context, "auth_storage_state_data", None):
+                    storage = context.auth_storage_state_data
+                    if storage.get("cookies"):
+                        await bctx.add_cookies(storage["cookies"])
+
                 page = await bctx.new_page()
 
-                try:
-                    from playwright_stealth import stealth_async
-                    await stealth_async(page)
-                except ImportError:
-                    pass
+                # Apply deep stealth scripts
+                await apply_stealth_scripts(page)
 
                 # Hook into all responses
                 async def on_response(response):
@@ -83,7 +94,7 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                                                        "application/ld+json")):
                             # Only reuse endpoints requested by the browser — never probe hidden ones
                             body_bytes = await response.body()
-                            if len(body_bytes) > 5 * 1024 * 1024:  # Skip >5 MB blobs
+                            if len(body_bytes) > MAX_API_RESPONSE_BYTES:  # Skip large blobs
                                 return
                             try:
                                 payload = json.loads(body_bytes)
@@ -107,8 +118,13 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                 final_url = url
                 ct = ""
 
-                nav_resp = await page.goto(url, wait_until="networkidle",
+                nav_resp = await page.goto(url, wait_until="domcontentloaded",
                                            timeout=context.timeout * 1000)
+                # Best-effort networkidle — captures most API calls without hanging
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
                 if nav_resp:
                     status_code = nav_resp.status
                     ct = nav_resp.headers.get("content-type", "")
@@ -156,7 +172,7 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
         )
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
+def run(url: str, context: EngineContext) -> EngineResult:
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
         return _pool.submit(asyncio.run, _run_async(url, context)).result()

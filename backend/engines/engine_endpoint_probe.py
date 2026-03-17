@@ -28,9 +28,8 @@ import logging
 import re
 import socket
 import time
-from dataclasses import dataclass, field
-from typing import Any, Optional
-from urllib.parse import urljoin, urlparse, urlunparse, urlencode, parse_qsl
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +84,7 @@ def _is_ssrf_blocked(url: str) -> bool:
 # URL normalisation helpers
 # ---------------------------------------------------------------------------
 
-def _normalise_url(url: str, base: str) -> Optional[str]:
+def _normalise_url(url: str, base: str) -> str | None:
     """Resolve *url* against *base*, strip fragment, sort query params. Returns None on failure."""
     if not url or url.startswith(("javascript:", "data:", "mailto:", "#", "void")):
         return None
@@ -258,7 +257,7 @@ def _make_session(context: Any) -> Any:
 # Pass 1 — HTML static analysis
 # ---------------------------------------------------------------------------
 
-def _pass_html(html: str, base_url: str) -> tuple[list[dict], Optional[str]]:
+def _pass_html(html: str, base_url: str) -> tuple[list[dict], str | None]:
     """
     Parse HTML for forms, API-path href links, HTML comments, and
     <link rel="describedby"> headers pointing to OpenAPI specs.
@@ -266,7 +265,7 @@ def _pass_html(html: str, base_url: str) -> tuple[list[dict], Optional[str]]:
     Returns (endpoints, spec_url_or_None).
     """
     endpoints: list[dict] = []
-    spec_url: Optional[str] = None
+    spec_url: str | None = None
 
     if not html:
         return endpoints, spec_url
@@ -360,7 +359,7 @@ def _pass_html(html: str, base_url: str) -> tuple[list[dict], Optional[str]]:
 # Pass 2 — JavaScript file mining
 # ---------------------------------------------------------------------------
 
-def _fetch_js(url: str, session: Any, timeout: int) -> Optional[str]:
+def _fetch_js(url: str, session: Any, timeout: int) -> str | None:
     """Fetch a JS file; return text content or None."""
     try:
         resp = session.get(url, timeout=timeout, stream=True,
@@ -511,7 +510,7 @@ _SPEC_PATHS = [
 ]
 
 
-def _probe_spec_path(url: str, session: Any) -> Optional[dict]:
+def _probe_spec_path(url: str, session: Any) -> dict | None:
     """Probe a single path for OpenAPI/Swagger JSON/YAML content. Returns parsed spec or None."""
     try:
         resp = session.get(url, timeout=_PROBE_TIMEOUT,
@@ -594,7 +593,7 @@ def _endpoints_from_openapi(spec: dict, base_url: str) -> list[dict]:
     return results
 
 
-def _pass_openapi_probing(base_url: str, session: Any, extra_spec_url: Optional[str]) -> tuple[bool, Optional[str], Optional[dict], list[dict]]:
+def _pass_openapi_probing(base_url: str, session: Any, extra_spec_url: str | None) -> tuple[bool, str | None, dict | None, list[dict]]:
     """
     Probe well-known paths for OpenAPI specs.
     Also checks extra_spec_url from <link rel=describedby> or Link header.
@@ -652,7 +651,7 @@ _GQL_INTROSPECT_QUERY = json.dumps({
 })
 
 
-def _probe_graphql_path(url: str, session: Any) -> tuple[bool, Optional[str]]:
+def _probe_graphql_path(url: str, session: Any) -> tuple[bool, str | None]:
     """Return (confirmed, typename_or_None) for a GraphQL endpoint."""
     try:
         resp = session.post(
@@ -672,7 +671,7 @@ def _probe_graphql_path(url: str, session: Any) -> tuple[bool, Optional[str]]:
     return False, None
 
 
-def _pass_graphql(base_url: str, session: Any) -> tuple[bool, Optional[str], Optional[list[str]]]:
+def _pass_graphql(base_url: str, session: Any) -> tuple[bool, str | None, list[str] | None]:
     """
     Detect GraphQL endpoints and optionally perform introspection.
 
@@ -686,7 +685,7 @@ def _pass_graphql(base_url: str, session: Any) -> tuple[bool, Optional[str], Opt
         confirmed, _ = _probe_graphql_path(probe_url, session)
         if confirmed:
             # Attempt introspection
-            type_names: Optional[list[str]] = None
+            type_names: list[str] | None = None
             try:
                 resp = session.post(
                     probe_url, data=_GQL_INTROSPECT_QUERY,
@@ -710,13 +709,13 @@ def _pass_graphql(base_url: str, session: Any) -> tuple[bool, Optional[str], Opt
 # Pass 5 — HTTP header mining
 # ---------------------------------------------------------------------------
 
-def _pass_headers(base_url: str, session: Any) -> tuple[Optional[str], list[str]]:
+def _pass_headers(base_url: str, session: Any) -> tuple[str | None, list[str]]:
     """
     Perform a HEAD request and mine useful headers.
 
     Returns (spec_url_from_link_header, notes).
     """
-    spec_url: Optional[str] = None
+    spec_url: str | None = None
     notes: list[str] = []
     try:
         resp = session.head(base_url, timeout=_PROBE_TIMEOUT, allow_redirects=True)
@@ -816,7 +815,7 @@ def _probe_endpoint(url: str, method: str, session: Any) -> dict:
                 body_preview = resp.text[:_RESPONSE_PREVIEW]
             except Exception:
                 pass
-        auth_required: Optional[bool] = None
+        auth_required: bool | None = None
         if resp.status_code in (401, 403):
             auth_required = True
         elif resp.status_code == 200:
@@ -875,17 +874,17 @@ def run(url: str, context: Any) -> Any:
     warnings: list[str] = []
     all_endpoints: list[dict] = []
     openapi_discovered = False
-    openapi_url: Optional[str] = None
-    openapi_spec_summary: Optional[dict] = None
+    openapi_url: str | None = None
+    openapi_spec_summary: dict | None = None
     graphql_discovered = False
-    graphql_url: Optional[str] = None
-    graphql_types: Optional[list[str]] = None
+    graphql_url: str | None = None
+    graphql_types: list[str] | None = None
     websocket_endpoints: list[str] = []
     source_maps_found: list[str] = []
     js_files_analyzed = 0
     header_notes: list[str] = []
-    spec_url_from_link: Optional[str] = None
-    spec_url_from_html: Optional[str] = None
+    spec_url_from_link: str | None = None
+    spec_url_from_html: str | None = None
     total_timeout = context.timeout
 
     # Run each pass in order, respecting overall timeout ceiling

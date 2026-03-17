@@ -16,8 +16,8 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +32,15 @@ def setup_json_logging(level: int = logging.INFO) -> None:
     Uses python-json-logger when available, falls back to a manual JSON formatter.
     """
     try:
-        from pythonjsonlogger import jsonlogger  # type: ignore[import]
+        try:
+            from pythonjsonlogger import json as jsonlogger  # type: ignore[import]
+        except ImportError:
+            from pythonjsonlogger import jsonlogger  # type: ignore[import]
 
         class _CustomJsonFormatter(jsonlogger.JsonFormatter):  # type: ignore[misc]
             def add_fields(self, log_record, record, message_dict):
                 super().add_fields(log_record, record, message_dict)
-                log_record["ts"] = datetime.now(timezone.utc).isoformat()
+                log_record["ts"] = datetime.now(UTC).isoformat()
                 log_record["level"] = record.levelname
                 log_record["logger"] = record.name
 
@@ -49,7 +52,7 @@ def setup_json_logging(level: int = logging.INFO) -> None:
         class _FallbackJson(logging.Formatter):  # type: ignore[misc]
             def format(self, record: logging.LogRecord) -> str:
                 payload = {
-                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "ts": datetime.now(UTC).isoformat(),
                     "level": record.levelname,
                     "logger": record.name,
                     "message": record.getMessage(),
@@ -75,12 +78,15 @@ def make_job_file_logger(log_path: str, job_id: str) -> logging.Handler:
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     try:
-        from pythonjsonlogger import jsonlogger  # type: ignore[import]
+        try:
+            from pythonjsonlogger import json as jsonlogger  # type: ignore[import]
+        except ImportError:
+            from pythonjsonlogger import jsonlogger  # type: ignore[import]
 
         class _JobJsonFormatter(jsonlogger.JsonFormatter):  # type: ignore[misc]
             def add_fields(self, log_record, record, message_dict):
                 super().add_fields(log_record, record, message_dict)
-                log_record["ts"] = datetime.now(timezone.utc).isoformat()
+                log_record["ts"] = datetime.now(UTC).isoformat()
                 log_record["job_id"] = job_id
                 log_record["level"] = record.levelname
 
@@ -90,7 +96,7 @@ def make_job_file_logger(log_path: str, job_id: str) -> logging.Handler:
         class _FallbackJobJson(logging.Formatter):  # type: ignore[misc]
             def format(self, record: logging.LogRecord) -> str:
                 return json.dumps({
-                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "ts": datetime.now(UTC).isoformat(),
                     "job_id": job_id,
                     "level": record.levelname,
                     "logger": record.name,
@@ -109,7 +115,12 @@ def make_job_file_logger(log_path: str, job_id: str) -> logging.Handler:
 
 try:
     from prometheus_client import (  # type: ignore[import]
-        Counter, Histogram, Gauge, CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest,
+        CONTENT_TYPE_LATEST,
+        CollectorRegistry,
+        Counter,
+        Gauge,
+        Histogram,
+        generate_latest,
     )
     _PROM_AVAILABLE = True
 
@@ -229,7 +240,7 @@ class PhaseTimeline:
         return duration_ms
 
     class _PhaseCtx:
-        def __init__(self, tl: "PhaseTimeline", phase: str):
+        def __init__(self, tl: PhaseTimeline, phase: str):
             self._tl = tl
             self._phase = phase
         def __enter__(self):
@@ -238,7 +249,7 @@ class PhaseTimeline:
         def __exit__(self, *_):
             self._tl.finish(self._phase)
 
-    def phase(self, phase_name: str) -> "_PhaseCtx":
+    def phase(self, phase_name: str) -> _PhaseCtx:
         """Context manager that auto-records start and finish."""
         return self._PhaseCtx(self, phase_name)
 
@@ -334,7 +345,7 @@ def network_payloads_to_har(
             body_text = json.dumps(payload, ensure_ascii=False) if payload else ""
             body_size = len(body_text.encode())
             entries.append({
-                "startedDateTime": datetime.now(timezone.utc).isoformat(),
+                "startedDateTime": datetime.now(UTC).isoformat(),
                 "time": p.get("elapsed_ms", 0.0),
                 "request": {
                     "method": p.get("method", "GET"),
@@ -372,7 +383,7 @@ def network_payloads_to_har(
                 "version": "1.2",
                 "creator": {"name": "UniversalScraper", "version": "3.0"},
                 "pages": [{
-                    "startedDateTime": datetime.now(timezone.utc).isoformat(),
+                    "startedDateTime": datetime.now(UTC).isoformat(),
                     "id": f"page_{job_id}",
                     "title": page_url,
                     "pageTimings": {},

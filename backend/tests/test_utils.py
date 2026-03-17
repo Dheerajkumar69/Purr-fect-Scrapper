@@ -2,8 +2,7 @@
 tests/test_utils.py — Unit tests for URL validation, SSRF protection, and helpers.
 """
 
-import pytest
-from utils import validate_url, is_valid_css_selector, is_valid_xpath, sanitize_text
+from utils import is_valid_css_selector, is_valid_xpath, sanitize_text, validate_url
 
 
 class TestValidateURL:

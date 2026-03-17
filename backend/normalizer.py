@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
-from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +204,7 @@ def _deduplicate_images(images: list[dict]) -> list[dict]:
     return out
 
 
-def normalize(engine_result: "Any") -> dict:
+def normalize(engine_result: Any) -> dict:
     """
     Convert one EngineResult into the unified schema dict.
     Each engine stores its data in slightly different shapes —

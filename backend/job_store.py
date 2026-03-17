@@ -25,16 +25,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class JobStore:
@@ -45,20 +42,9 @@ class JobStore:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._init_db()
 
-    @contextmanager
     def _conn(self):
-        con = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False)
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA journal_mode=WAL")
-        con.execute("PRAGMA synchronous=NORMAL")
-        try:
-            yield con
-            con.commit()
-        except Exception:
-            con.rollback()
-            raise
-        finally:
-            con.close()
+        from db_pool import get_connection
+        return get_connection(self._db_path)
 
     def _init_db(self) -> None:
         with self._conn() as con:
@@ -96,7 +82,7 @@ class JobStore:
         job_id: str,
         url: str,
         priority: float = 5.0,
-        params: Optional[dict] = None,
+        params: dict | None = None,
     ) -> None:
         """
         Insert a new job record.
@@ -189,7 +175,7 @@ class JobStore:
 
     # ------------------------------------------------------------------ reads
 
-    def get(self, job_id: str) -> Optional[dict]:
+    def get(self, job_id: str) -> dict | None:
         with self._conn() as con:
             row = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         if row is None:
@@ -216,7 +202,7 @@ class JobStore:
 
     def list_jobs(
         self,
-        status: Optional[str] = None,
+        status: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
@@ -231,7 +217,7 @@ class JobStore:
             rows = con.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
-    def count(self, status: Optional[str] = None) -> int:
+    def count(self, status: str | None = None) -> int:
         if status:
             sql = "SELECT COUNT(*) FROM jobs WHERE status=?"
             params = [status]

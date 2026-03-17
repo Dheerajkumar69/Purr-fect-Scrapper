@@ -12,20 +12,16 @@ from __future__ import annotations
 
 import io
 import logging
-import os
-import sys
 import time
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
-_MAX_BYTES = 50 * 1024 * 1024  # 50 MB for files
+from config import MAX_FILE_BYTES as _MAX_BYTES
 
 
 def _detect_file_type(url: str, content_type: str, first_bytes: bytes) -> str:
@@ -60,9 +56,10 @@ def _detect_file_type(url: str, content_type: str, first_bytes: bytes) -> str:
     return "unknown"
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
-    from engines import EngineResult
+def run(url: str, context: EngineContext) -> EngineResult:
     import requests
+
+    from engines import EngineResult
     from utils import get_headers
 
     start = time.time()
@@ -173,8 +170,9 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
         # --- XML / RSS / Atom ---
         elif file_type == "xml":
             try:
-                import xmltodict
                 import json as _json
+
+                import xmltodict
                 parsed = xmltodict.parse(raw_bytes.decode("utf-8", errors="replace"))
                 # Detect RSS/Atom
                 rss_channel = (parsed.get("rss", {}) or {}).get("channel")

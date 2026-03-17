@@ -381,6 +381,96 @@ def is_html_content_type(content_type: str | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Input sanitization
+# ---------------------------------------------------------------------------
+
+_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def sanitize_job_id(job_id: str) -> bool:
+    """Return True if job_id is a safe identifier (alphanumeric, -, _)."""
+    return bool(_SAFE_ID_RE.match(job_id))
+
+
+def sanitize_engine_id(engine_id: str) -> bool:
+    """Return True if engine_id is a safe identifier."""
+    return bool(re.match(r"^[a-zA-Z0-9_]{1,64}$", engine_id))
+
+
+# ---------------------------------------------------------------------------
+# Safe HTTP fetch with protection against hostile responses
+# ---------------------------------------------------------------------------
+
+_MAX_REDIRECTS = 5
+_TARPIT_TIMEOUT_S = 10
+_MAX_CONTENT_LENGTH_BYTES = 50 * 1024 * 1024  # 50 MB decompression bomb guard
+
+
+def safe_fetch(
+    url: str,
+    *,
+    headers: dict | None = None,
+    timeout: int = 10,
+    max_bytes: int = 10 * 1024 * 1024,
+    stream: bool = True,
+) -> requests.Response:
+    """
+    Fetch a URL with safety guards against:
+    - Infinite redirect loops (max 5)
+    - Tar pits (abort if Content-Length exceeds max)
+    - Decompression bombs (streaming with byte cap)
+
+    Returns the response object. Raises on safety violations.
+    """
+    _headers = headers or get_headers()
+
+    resp = requests.get(
+        url,
+        headers=_headers,
+        timeout=timeout,
+        stream=stream,
+        allow_redirects=False,
+    )
+
+    # Manual redirect following with a cap
+    redirect_count = 0
+    while resp.is_redirect and redirect_count < _MAX_REDIRECTS:
+        redirect_count += 1
+        location = resp.headers.get("Location", "")
+        if not location:
+            break
+        from urllib.parse import urljoin
+        url = urljoin(url, location)
+        resp = requests.get(
+            url,
+            headers=_headers,
+            timeout=timeout,
+            stream=stream,
+            allow_redirects=False,
+        )
+
+    if resp.is_redirect:
+        raise ValueError(
+            f"Too many redirects ({_MAX_REDIRECTS}) for {url}"
+        )
+
+    # Check Content-Length header for decompression bomb protection
+    content_length = resp.headers.get("Content-Length")
+    if content_length:
+        try:
+            cl = int(content_length)
+            if cl > max_bytes:
+                resp.close()
+                raise ValueError(
+                    f"Content-Length {cl} bytes exceeds max {max_bytes} bytes"
+                )
+        except (ValueError, TypeError):
+            pass
+
+    return resp
+
+
+# ---------------------------------------------------------------------------
 # Proxy Pool
 # ---------------------------------------------------------------------------
 

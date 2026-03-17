@@ -15,7 +15,6 @@ import heapq
 import logging
 import os
 import re
-import sys
 import time
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
@@ -24,7 +23,6 @@ from urllib.robotparser import RobotFileParser
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +31,10 @@ _CHECKPOINT_EVERY = 25  # save BFS state every N pages
 
 try:
     from crawl_checkpoint import (
-        CrawlCheckpoint, CrawlDelayThrottle,
-        discover_rss_urls, resolve_canonical,
+        CrawlCheckpoint,
+        CrawlDelayThrottle,
+        discover_rss_urls,
+        resolve_canonical,
     )
     _CHECKPOINT_AVAILABLE = True
 except ImportError:
@@ -59,7 +59,7 @@ def _normalize_url(raw: str) -> str:
     * Remove fragment
     * Remove tracking / session query params; sort remaining params
     """
-    from urllib.parse import urlparse, urlencode, parse_qsl, urlunparse
+    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
     p = urlparse(raw)
     scheme = p.scheme.lower()
     netloc = p.netloc.lower()
@@ -122,10 +122,11 @@ def _parse_sitemap(sitemap_url: str, headers: dict, timeout: int,
         return []
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
-    from engines import EngineResult
+def run(url: str, context: EngineContext) -> EngineResult:
     import requests
     from bs4 import BeautifulSoup
+
+    from engines import EngineResult
     from utils import get_headers, get_proxy_dict
 
     start = time.time()
@@ -235,6 +236,27 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
                 logger.debug("[%s] RSS seeding failed: %s", context.job_id, _rsse)
 
         while heap and len(pages) + pages_count_offset < max_pages:
+            # Cooperative cancellation check
+            if context.is_cancelled():
+                logger.info(
+                    "[%s] crawl_discovery: cancelled by orchestrator after %d pages",
+                    context.job_id, len(pages),
+                )
+                warnings.append(f"BFS stopped: engine cancelled after {len(pages)} pages.")
+                break
+            # Hard time cap: respect per-engine timeout
+            _elapsed = time.time() - start
+            if _elapsed > context.timeout:
+                logger.info(
+                    "[%s] crawl_discovery: time limit reached (%.1fs > %ds) "
+                    "after %d pages — stopping BFS",
+                    context.job_id, _elapsed, context.timeout, len(pages),
+                )
+                warnings.append(
+                    f"BFS stopped: engine timeout ({context.timeout}s) reached "
+                    f"after {len(pages)} pages."
+                )
+                break
             priority, _, current_url, depth = heapq.heappop(heap)
             if current_url in visited:
                 continue

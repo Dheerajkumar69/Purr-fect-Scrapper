@@ -23,9 +23,9 @@ Each finding dict:
 
 from __future__ import annotations
 
+import logging
 import re
 import time
-import logging
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -272,13 +272,14 @@ def _fetch_text(url: str, timeout: int, headers: dict) -> str:
         return ""
 
 
-def run(url: str, context: "Any") -> "Any":
+def run(url: str, context: Any) -> Any:
     """
     Secret scanner engine entry point.
     Scans the seed page and its linked JS files for exposed credentials.
     """
-    from engines import EngineContext, EngineResult
     import requests
+
+    from engines import EngineResult
     from utils import get_headers
 
     t0 = time.time()

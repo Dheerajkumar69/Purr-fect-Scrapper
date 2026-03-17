@@ -27,9 +27,8 @@ from __future__ import annotations
 import heapq
 import logging
 import threading
-import time
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +46,7 @@ class _QueueEntry:
         self.job_id = job_id
         self.fn = fn
 
-    def __lt__(self, other: "_QueueEntry") -> bool:
+    def __lt__(self, other: _QueueEntry) -> bool:
         return (self.priority, self.seq) < (other.priority, other.seq)
 
 
@@ -95,7 +94,7 @@ class JobQueue:
             max_workers=max_concurrent,
             thread_name_prefix="scrape-worker",
         )
-        self._dispatcher_thread: Optional[threading.Thread] = None
+        self._dispatcher_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
     # ------------------------------------------------------------------ public
@@ -266,14 +265,14 @@ class JobQueue:
                 logger.exception("JobQueue: dispatch failed for job %s: %s", job_id, exc)
                 self._store.set_failed(job_id, f"Dispatch failed: {exc}")
 
-    def _next_dispatchable(self) -> Optional[_QueueEntry]:
+    def _next_dispatchable(self) -> _QueueEntry | None:
         """Peek at the heap and return the first non-paused, non-cancelled entry, or None."""
         for entry in self._heap:
             if entry.job_id not in self._paused and entry.job_id not in self._cancelled:
                 return entry
         return None
 
-    def _pop_dispatchable(self) -> Optional[_QueueEntry]:
+    def _pop_dispatchable(self) -> _QueueEntry | None:
         """
         Remove and return the first dispatchable entry from the heap.
         Cancelled/paused entries encountered are left in the heap
@@ -281,7 +280,7 @@ class JobQueue:
         """
         # Rebuild heap skipping only cancelled (they should not stay)
         tmp: list[_QueueEntry] = []
-        result: Optional[_QueueEntry] = None
+        result: _QueueEntry | None = None
         cancelled_to_skip: list[_QueueEntry] = []
 
         while self._heap:

@@ -14,16 +14,12 @@ Covers:
 """
 
 import os
-import sys
 import tempfile
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from unittest.mock import MagicMock, patch
 
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
 
-from engines import EngineContext, EngineResult, ENGINE_IDS
-
+from engines import ENGINE_IDS, EngineContext, EngineResult
 
 # ---------------------------------------------------------------------------
 # 1. Engine ID sync — _ALL_ENGINE_IDS includes endpoint_probe
@@ -31,16 +27,16 @@ from engines import EngineContext, EngineResult, ENGINE_IDS
 
 class TestEngineIDSync:
     def test_all_engine_ids_includes_endpoint_probe(self):
-        from main import _ALL_ENGINE_IDS
+        from routes.scrape import _ALL_ENGINE_IDS
         assert "endpoint_probe" in _ALL_ENGINE_IDS
 
     def test_all_engine_ids_matches_registry(self):
-        from main import _ALL_ENGINE_IDS
+        from routes.scrape import _ALL_ENGINE_IDS
         assert _ALL_ENGINE_IDS == frozenset(ENGINE_IDS)
 
     def test_v2_validator_accepts_endpoint_probe(self):
         """ScrapeRequestV2 should accept endpoint_probe as a valid engine."""
-        from main import ScrapeRequestV2
+        from routes.scrape import ScrapeRequestV2
         req = ScrapeRequestV2(
             url="https://example.com",
             engines=["endpoint_probe"],
@@ -64,7 +60,7 @@ class TestDomainProfileLookup:
 
     def test_get_engines_to_skip_uses_domain(self):
         """get_engines_to_skip must work when the store has data keyed by domain."""
-        from domain_profile import DomainProfileStore, _domain_from_url
+        from domain_profile import DomainProfileStore
         with tempfile.TemporaryDirectory() as td:
             store = DomainProfileStore(os.path.join(td, "dp.sqlite"))
             domain = "example.com"

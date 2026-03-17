@@ -6,18 +6,18 @@ import pytest
 from bs4 import BeautifulSoup
 
 from parser import (
-    parse_title,
-    parse_meta,
-    parse_headings,
-    parse_paragraphs,
-    parse_links,
-    parse_images,
-    parse_tables,
-    parse_lists,
-    parse_forms,
+    parse_all,
     parse_custom_css,
     parse_custom_xpath,
-    parse_all,
+    parse_forms,
+    parse_headings,
+    parse_images,
+    parse_links,
+    parse_lists,
+    parse_meta,
+    parse_paragraphs,
+    parse_tables,
+    parse_title,
 )
 
 # ---------------------------------------------------------------------------

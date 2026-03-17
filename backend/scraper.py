@@ -21,12 +21,17 @@ import concurrent.futures
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
 
-from utils import DEFAULT_HEADERS, MAX_CONTENT_LENGTH, REQUEST_TIMEOUT, get_headers, is_html_content_type
+from utils import (
+    DEFAULT_HEADERS,
+    MAX_CONTENT_LENGTH,
+    REQUEST_TIMEOUT,
+    get_headers,
+    is_html_content_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +51,7 @@ class ScraperResult:
     mode: str           # "static" | "dynamic"
     final_url: str      # after redirects
     content_type: str = ""
-    error: Optional[str] = None
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +195,8 @@ class DynamicScraper:
     async def _fetch_async(self, url: str) -> ScraperResult:
         """Async implementation — launched in a dedicated thread."""
         try:
-            from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+            from playwright.async_api import TimeoutError as PWTimeout
+            from playwright.async_api import async_playwright
         except ImportError:
             raise RuntimeError(
                 "Playwright is not installed. "

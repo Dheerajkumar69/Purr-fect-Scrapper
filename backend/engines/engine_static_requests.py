@@ -11,24 +11,27 @@ Best for: blogs, docs sites, news pages, simple company sites.
 from __future__ import annotations
 
 import logging
-import sys
-import os
 import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
-    from engines import EngineResult
+def run(url: str, context: EngineContext) -> EngineResult:
     import requests
     from bs4 import BeautifulSoup
-    from utils import get_headers, get_proxy_dict, MAX_CONTENT_LENGTH, REQUEST_TIMEOUT, is_html_content_type
+
+    from engines import EngineResult
+    from utils import (
+        MAX_CONTENT_LENGTH,
+        get_headers,
+        get_proxy_dict,
+        is_html_content_type,
+    )
 
     start = time.time()
     engine_id = "static_requests"
@@ -56,15 +59,8 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
                 error=f"Non-HTML content-type: {ct}", elapsed_s=time.time() - start,
             )
 
-        # Stream-read up to MAX_CONTENT_LENGTH
-        chunks: list[bytes] = []
-        downloaded = 0
-        for chunk in resp.iter_content(chunk_size=65536):
-            downloaded += len(chunk)
-            if downloaded > MAX_CONTENT_LENGTH:
-                break
-            chunks.append(chunk)
-        raw_bytes = b"".join(chunks)
+        from resource_monitor import read_response_capped
+        raw_bytes = read_response_capped(resp, max_bytes=MAX_CONTENT_LENGTH, chunk_size=65536)
 
         # Encoding detection
         encoding = resp.encoding
@@ -80,13 +76,22 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
 
         # Parse with BS4/lxml — use production parser functions for consistency
         from bs4 import BeautifulSoup
-        from parser import (
-            parse_headings, parse_images as _parse_images,
-            parse_links as _parse_links, parse_forms,
-            parse_json_ld, parse_opengraph, parse_semantic_zones,
-            parse_main_content,
-        )
+
         from normalizer import _detect_language_from_html
+        from parser import (
+            parse_forms,
+            parse_headings,
+            parse_json_ld,
+            parse_main_content,
+            parse_opengraph,
+            parse_semantic_zones,
+        )
+        from parser import (
+            parse_images as _parse_images,
+        )
+        from parser import (
+            parse_links as _parse_links,
+        )
 
         soup = BeautifulSoup(html, "lxml")
         title = soup.find("title")

@@ -11,22 +11,20 @@ Best for: e-commerce product pages, news articles, recipe sites, SEO-rich pages.
 from __future__ import annotations
 
 import logging
-import os
-import sys
 import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
-    from engines import EngineResult
+def run(url: str, context: EngineContext) -> EngineResult:
     from bs4 import BeautifulSoup
+
+    from engines import EngineResult
 
     start = time.time()
     engine_id = "structured_metadata"
@@ -39,6 +37,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
     if not html:
         try:
             import requests
+
             from utils import get_headers
             resp = requests.get(url, headers=get_headers(), timeout=context.timeout,
                                 allow_redirects=True)

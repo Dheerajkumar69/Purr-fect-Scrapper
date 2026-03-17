@@ -12,8 +12,6 @@ Best for: long-form content, documentation, knowledge discovery.
 from __future__ import annotations
 
 import logging
-import os
-import sys
 import tempfile
 import time
 from typing import TYPE_CHECKING
@@ -21,12 +19,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
+def run(url: str, context: EngineContext) -> EngineResult:
     from engines import EngineResult
 
     start = time.time()
@@ -38,6 +35,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
     if not html:
         try:
             import requests
+
             from utils import get_headers
             resp = requests.get(url, headers=get_headers(), timeout=context.timeout,
                                 allow_redirects=True)
@@ -85,8 +83,8 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
         # Build Whoosh index in temp dir
         try:
             from whoosh import index as whoosh_index
-            from whoosh.fields import Schema, TEXT, ID, STORED, NUMERIC
             from whoosh.analysis import StemmingAnalyzer
+            from whoosh.fields import ID, NUMERIC, STORED, TEXT, Schema
 
             schema = Schema(
                 doc_id=ID(stored=True),

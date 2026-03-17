@@ -104,6 +104,15 @@ document.addEventListener('DOMContentLoaded', () => {
   bindClassicCheckboxes();
   bindTabs();
   cancelJobBtn.addEventListener('click', handleCancelJob);
+  loadServerCapabilities();
+
+  // Global CMD+K shortcut to focus input
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      urlInput.focus();
+    }
+  });
 });
 
 // ─── Tab switching ────────────────────────────────────────
@@ -133,6 +142,38 @@ function setTabBadge(badgeEl, count, cls) {
   badgeEl.classList.remove('hidden');
 }
 
+// ─── Server capability detection ──────────────────────────
+// Called once on load. Greys out engine chips that require capabilities
+// (tesseract, AI_SCRAPER_ENABLED) that are not available on this server.
+function loadServerCapabilities() {
+  fetch('/health')
+    .then(r => r.json())
+    .then(h => {
+      if (!h.capabilities?.ai_assist) {
+        _disableEngineChip(
+          'ai_assist',
+          'AI Assist is disabled on this server. Set AI_SCRAPER_ENABLED=1 to enable.'
+        );
+      }
+      if (!h.capabilities?.ocr) {
+        _disableEngineChip(
+          'visual_ocr',
+          'OCR unavailable: tesseract not found in PATH. Install tesseract-ocr to enable.'
+        );
+      }
+    })
+    .catch(() => {}); // degrade silently if /health does not expose capabilities
+}
+
+function _disableEngineChip(engineId, tooltipMsg) {
+  const lbl = document.querySelector(`[data-engine-id="${engineId}"]`);
+  if (!lbl) return;
+  const cb = lbl.querySelector('input[type=checkbox]');
+  if (cb) { cb.disabled = true; cb.checked = false; }
+  lbl.classList.add('engine-chip-disabled');
+  lbl.title = tooltipMsg;
+}
+
 // ─── Engine checkbox grid ─────────────────────────────────
 function renderEngineCheckboxes() {
   engineCheckboxes.innerHTML = '';
@@ -152,6 +193,7 @@ function renderEngineCheckboxes() {
       const lbl = document.createElement('label');
       lbl.className = 'engine-chip';
       lbl.title = eng.description;
+      lbl.dataset.engineId = eng.id;
       lbl.innerHTML = `
         <input type="checkbox" name="engine" value="${escHtml(eng.id)}" checked />
         <span class="engine-chip-label">${escHtml(eng.label)}</span>`;
@@ -169,12 +211,34 @@ function getSelectedEngines() {
 function bindSelectAll() {
   selectAllBtn.addEventListener('click', () => {
     document.querySelectorAll('#engine-checkboxes input[type=checkbox]')
-      .forEach(cb => cb.checked = true);
+      .forEach(cb => { if (!cb.disabled) cb.checked = true; });
   });
   deselectAllBtn.addEventListener('click', () => {
     document.querySelectorAll('#engine-checkboxes input[type=checkbox]')
       .forEach(cb => cb.checked = false);
   });
+  // Preset buttons
+  $('preset-security-recon')?.addEventListener('click',   () => applyPreset('security_recon'));
+  $('preset-content-research')?.addEventListener('click', () => applyPreset('content_research'));
+}
+
+const PRESETS = {
+  security_recon: new Set([
+    'endpoint_probe', 'secret_scan', 'static_requests',
+    'static_httpx', 'structured_metadata', 'network_observe',
+  ]),
+  content_research: new Set([
+    'static_requests', 'static_httpx', 'headless_playwright', 'dom_interaction',
+    'structured_metadata', 'crawl_discovery', 'visual_ocr', 'ai_assist',
+    'hybrid', 'search_index',
+  ]),
+};
+
+function applyPreset(name) {
+  const selected = PRESETS[name];
+  if (!selected) return;
+  document.querySelectorAll('#engine-checkboxes input[type=checkbox]')
+    .forEach(cb => { if (!cb.disabled) cb.checked = selected.has(cb.value); });
 }
 
 // ─── Mode toggle ──────────────────────────────────────────
@@ -252,62 +316,82 @@ async function handleScrapeV2() {
   showProgressSection(jobId);
   addLogRow('info', 'queued', 0, `Job ${jobId} accepted`);
 
-  const sseOk = await trySSE(jobId);
-  if (!sseOk) pollJob(jobId);
+  // Start polling IMMEDIATELY as a safety net — it always works
+  startPolling(jobId);
+  // Try SSE on top for faster real-time updates
+  trySSE(jobId);
 }
 
-// ─── SSE streaming ────────────────────────────────────────
+// ─── SSE streaming (enhancement, not required) ────────────
 function trySSE(jobId) {
-  return new Promise(resolve => {
-    let resolved = false;
-    const timeout = setTimeout(() => { if (!resolved) { resolved = true; resolve(false); } }, 3000);
+  let es;
+  try { es = new EventSource(`/jobs/${jobId}/stream`); }
+  catch { return; }   // SSE unavailable — polling will handle it
 
-    let es;
-    try { es = new EventSource(`/jobs/${jobId}/stream`); }
-    catch { clearTimeout(timeout); resolve(false); return; }
+  let lastDataAt = Date.now();
+  const STALE_TIMEOUT_MS = 20000;  // close SSE if no data for 20s
 
-    es.onopen = () => { clearTimeout(timeout); if (!resolved) { resolved = true; resolve(true); } };
-
-    es.onmessage = e => {
-      clearTimeout(timeout);
-      if (!resolved) { resolved = true; resolve(true); }
-      let ev;
-      try { ev = JSON.parse(e.data); } catch { return; }
-      handleProgressEvent(ev, jobId, es);
-    };
-
-    es.onerror = () => {
+  // Heartbeat: if SSE goes silent, close it — polling is our safety net
+  const heartbeat = setInterval(() => {
+    if (Date.now() - lastDataAt > STALE_TIMEOUT_MS) {
+      clearInterval(heartbeat);
       es.close();
-      if (!resolved) { clearTimeout(timeout); resolved = true; resolve(false); }
-      else { pollJob(jobId); }
-    };
-  });
+      addLogRow('info', 'sse', 0, 'SSE went silent — relying on polling');
+    }
+  }, 5000);
+
+  es.onmessage = e => {
+    lastDataAt = Date.now();
+    let ev;
+    try { ev = JSON.parse(e.data); } catch { return; }
+
+    if (ev.phase === 'done' || ev.phase === '__DONE__') {
+      clearInterval(heartbeat);
+      es.close();
+      updateProgressBar(1, 'done');
+      if (ev.status === 'failed') { onJobFailed(ev.error || 'Job failed'); return; }
+      fetchFinalResult(jobId);
+      return;
+    }
+
+    handleProgressEvent(ev, jobId, null);  // null es — don't let handler close it
+  };
+
+  es.onerror = () => {
+    clearInterval(heartbeat);
+    es.close();
+    // polling is already running — no action needed
+  };
 }
 
-// ─── Polling fallback ─────────────────────────────────────
-async function pollJob(jobId) {
-  const INTERVAL = 1500;
-  addLogRow('info', 'poll', 0, 'SSE unavailable — polling for status…');
+// ─── Polling (always-on safety net) ───────────────────────
+function startPolling(jobId) {
+  const INTERVAL = 2000;
+  let stopped = false;
 
   const tick = async () => {
-    if (_lastJobId !== jobId) return;
+    if (stopped || _lastJobId !== jobId) return;
     try {
       const res  = await fetch(`/jobs/${jobId}`);
       const data = await res.json();
       const pct  = data.progress ?? 0;
-      const phase = data.phase  || data.status || '';
+      const phase = data.phase || data.status || '';
       updateProgressBar(pct, phase);
-      addLogRow('info', phase, pct, `status=${data.status} progress=${Math.round(pct*100)}%`);
+      if (pct > 0) {
+        addLogRow('info', phase, pct, `status=${data.status} progress=${Math.round(pct*100)}%`);
+      }
       if (data.status === 'done') {
+        stopped = true;
         onJobDone(data.result || {}, jobId);
       } else if (data.status === 'failed') {
+        stopped = true;
         onJobFailed(data.error || 'Unknown error');
       } else {
         setTimeout(tick, INTERVAL);
       }
     } catch (err) {
       addLogRow('err', 'poll', 0, `Poll error: ${err.message}`);
-      setTimeout(tick, INTERVAL * 2);
+      if (!stopped) setTimeout(tick, INTERVAL * 2);
     }
   };
   setTimeout(tick, INTERVAL);
@@ -334,9 +418,9 @@ function handleProgressEvent(ev, jobId, es) {
 
   if (ev.engine_id) {
     const success = ev.success;
-    if (success === true)        markEngineChip(ev.engine_id, 'ok');
-    else if (success === false)  markEngineChip(ev.engine_id, 'err');
-    else                         markEngineChip(ev.engine_id, 'running');
+    if (success === true)        markEngineChip(ev.engine_id, 'ok',      '');
+    else if (success === false)  markEngineChip(ev.engine_id, 'err',     ev.error || '');
+    else                         markEngineChip(ev.engine_id, 'running', '');
   }
 
   const lvl = ev.error ? 'err' : (pct >= 0.99 ? 'ok' : 'info');
@@ -395,7 +479,12 @@ function onJobDone(result, jobId) {
   const crawlPages = (merged.pages || merged.crawl_pages || []).length;
   setTabBadge(crawlBadge, crawlPages || null, 'tab-badge-info');
 
-  // Auto-switch to Security tab if critical/high secrets found
+  // Persistent security callout: shown whenever any security findings exist
+  const anyFindings = secrets.length > 0 || endpoints > 0;
+  const secCallout = $('security-callout');
+  if (secCallout) secCallout.classList.toggle('hidden', !anyFindings);
+
+  // Auto-switch to Security tab only on critical/high secrets
   if (critHigh > 0) {
     switchTab('security');
   } else {
@@ -493,21 +582,21 @@ function renderReportFields(merged) {
   if (!merged) return;
 
   const fields = [
-    { key: 'title',        label: 'Title',        icon: '📄' },
-    { key: 'description',  label: 'Description',  icon: '📝' },
-    { key: 'language',     label: 'Language',     icon: '🌐' },
-    { key: 'page_type',    label: 'Page Type',    icon: '🏷️' },
-    { key: 'canonical_url',label: 'Canonical URL',icon: '🔗' },
-    { key: 'main_content', label: 'Main Content', icon: '📰', truncate: 200 },
+    { key: 'title',        label: 'Title',        icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>' },
+    { key: 'description',  label: 'Description',  icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="2" x2="22" y2="6"></line><path d="M7.5 20.5 19 9l-4-4L3.5 16.5 2 22z"></path></svg>' },
+    { key: 'language',     label: 'Language',     icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>' },
+    { key: 'page_type',    label: 'Page Type',    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>' },
+    { key: 'canonical_url',label: 'Canonical URL',icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>' },
+    { key: 'main_content', label: 'Main Content', icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"></path><path d="M18 14h-8"></path><path d="M15 18h-5"></path></svg>', truncate: 200 },
   ];
 
   const counts = [
-    { key: 'links',    label: 'Links',    icon: '🔗' },
-    { key: 'images',   label: 'Images',   icon: '🖼️' },
-    { key: 'headings', label: 'Headings', icon: '📑' },
-    { key: 'forms',    label: 'Forms',    icon: '📋' },
-    { key: 'tables',   label: 'Tables',   icon: '📊' },
-    { key: 'keywords', label: 'Keywords', icon: '🔍' },
+    { key: 'links',    label: 'Links',    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>' },
+    { key: 'images',   label: 'Images',   icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>' },
+    { key: 'headings', label: 'Headings', icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h8"></path><path d="M4 18V6"></path><path d="M12 18V6"></path><path d="M21 12h-4"></path><path d="M21 18V6"></path><path d="M17 18V6"></path></svg>' },
+    { key: 'forms',    label: 'Forms',    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>' },
+    { key: 'tables',   label: 'Tables',   icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line><line x1="9" y1="9" x2="9" y2="21"></line><line x1="15" y1="9" x2="15" y2="21"></line></svg>' },
+    { key: 'keywords', label: 'Keywords', icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>' },
   ];
 
   let html = '';
@@ -562,13 +651,13 @@ function renderEndpointTable(data) {
   // Summary badges
   const badges = [];
   if (summary.openapi_discovered && summary.openapi_url) {
-    badges.push(`<span class="ep-ui-badge ep-badge-green">&#128196; OpenAPI: ${escHtml(summary.openapi_url)}</span>`);
+    badges.push(`<span class="ep-ui-badge ep-badge-green"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg> OpenAPI: ${escHtml(summary.openapi_url)}</span>`);
   }
   if (summary.graphql_discovered && summary.graphql_url) {
-    badges.push(`<span class="ep-ui-badge ep-badge-purple">&#11042; GraphQL: ${escHtml(summary.graphql_url)}</span>`);
+    badges.push(`<span class="ep-ui-badge ep-badge-purple"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg> GraphQL: ${escHtml(summary.graphql_url)}</span>`);
   }
   if (summary.cors_exposed_count) {
-    badges.push(`<span class="ep-ui-badge ep-badge-red">&#9888; CORS Wildcard: ${escHtml(String(summary.cors_exposed_count))}</span>`);
+    badges.push(`<span class="ep-ui-badge ep-badge-red"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> CORS Wildcard: ${escHtml(String(summary.cors_exposed_count))}</span>`);
   }
   if (summary.risk_summary) {
     const rs = summary.risk_summary;
@@ -601,12 +690,12 @@ function renderEndpointTable(data) {
     const rowHtml = eps.slice(0, 200).map(ep => {
       const rl = (ep.risk_level || 'INFO').toUpperCase();
       const authHtml = ep.auth_required === false
-        ? '<span style="color:#f87171">&#10007; Open</span>'
+        ? '<span style="color:var(--danger)"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:2px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg> Open</span>'
         : ep.auth_required === true
-          ? '<span style="color:#4ade80">&#10003; Auth</span>'
-          : '<span style="color:#94a3b8">?</span>';
+          ? '<span style="color:var(--success)"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:2px;"><polyline points="20 6 9 17 4 12"></polyline></svg> Auth</span>'
+          : '<span style="color:var(--text-muted)">?</span>';
       const corsHtml = ep.cors_permissive
-        ? '<span style="color:#fb923c">&#9888; Wildcard</span>'
+        ? '<span style="color:var(--warning)"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:2px;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg> Wildcard</span>'
         : '&#8212;';
       const scHtml = ep.status_code
         ? `<span style="color:${ep.status_code === 200 ? '#4ade80' : ep.status_code >= 400 ? '#fb923c' : '#94a3b8'}">${escHtml(String(ep.status_code))}</span>`
@@ -673,7 +762,7 @@ function renderSecretsTable(data) {
 
   // Summary badges
   const sBadges = [];
-  if (summary.critical_count) sBadges.push(`<span class="ep-ui-badge ep-badge-red">&#128683; CRITICAL: ${escHtml(String(summary.critical_count))}</span>`);
+  if (summary.critical_count) sBadges.push(`<span class="ep-ui-badge ep-badge-red"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> CRITICAL: ${escHtml(String(summary.critical_count))}</span>`);
   if (summary.high_count)     sBadges.push(`<span class="ep-ui-badge ep-badge-red">HIGH: ${escHtml(String(summary.high_count))}</span>`);
   if (summary.medium_count)   sBadges.push(`<span class="ep-ui-badge ep-badge-orange">MEDIUM: ${escHtml(String(summary.medium_count))}</span>`);
   if (summary.low_count)      sBadges.push(`<span class="ep-ui-badge ep-badge-gray">LOW: ${escHtml(String(summary.low_count))}</span>`);
@@ -891,7 +980,7 @@ function activatePhaseStep(phase) {
   });
 }
 
-function markEngineChip(engineId, state) {
+function markEngineChip(engineId, state, errorMsg = '') {
   let chip = engineLiveGrid.querySelector(`[data-eng="${engineId}"]`);
   if (!chip) {
     chip = document.createElement('span');
@@ -902,8 +991,8 @@ function markEngineChip(engineId, state) {
   }
   chip.classList.remove('running', 'ok', 'err');
   chip.classList.add(state);
-  if (state === 'ok')  chip.title = '✓ OK';
-  if (state === 'err') chip.title = '✗ Failed';
+  if (state === 'ok')  chip.title = '\u2713 OK';
+  if (state === 'err') chip.title = errorMsg ? `\u2717 ${errorMsg}` : '\u2717 Failed';
 }
 
 function addLogRow(level, phase, pct, message) {
@@ -1033,6 +1122,7 @@ function clearResults() {
   resultSection.classList.add('hidden');
   endpointPanel.classList.add('hidden');
   secretsPanel.classList.add('hidden');
+  $('security-callout')?.classList.add('hidden');
   $('security-empty').classList.add('hidden');
   $('report-fields-panel').classList.add('hidden');
   $('report-fields-grid').innerHTML = '';

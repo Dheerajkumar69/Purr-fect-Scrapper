@@ -29,18 +29,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
-from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from difflib import unified_diff
-from typing import Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _domain(url: str) -> str:
@@ -59,20 +56,9 @@ class HistoryStore:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._init_db()
 
-    @contextmanager
     def _conn(self):
-        con = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False)
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA journal_mode=WAL")
-        con.execute("PRAGMA synchronous=NORMAL")
-        try:
-            yield con
-            con.commit()
-        except Exception:
-            con.rollback()
-            raise
-        finally:
-            con.close()
+        from db_pool import get_connection
+        return get_connection(self._db_path)
 
     def _init_db(self) -> None:
         with self._conn() as con:
@@ -110,7 +96,7 @@ class HistoryStore:
         url: str,
         job_id: str,
         merged: dict,
-        selector_hits: Optional[dict] = None,
+        selector_hits: dict | None = None,
     ) -> int:
         """
         Save a new history snapshot for *url*.
@@ -168,7 +154,7 @@ class HistoryStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_version(self, url: str, version: int) -> Optional[dict]:
+    def get_version(self, url: str, version: int) -> dict | None:
         """Fetch a specific version snapshot."""
         with self._conn() as con:
             row = con.execute(
@@ -188,7 +174,7 @@ class HistoryStore:
             d["selector_hits"] = {}
         return d
 
-    def get_latest(self, url: str) -> Optional[dict]:
+    def get_latest(self, url: str) -> dict | None:
         """Return the most recent snapshot for a URL."""
         with self._conn() as con:
             row = con.execute(

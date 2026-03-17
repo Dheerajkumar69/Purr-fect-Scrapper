@@ -2,10 +2,17 @@
 Engine 5 — DOM Interaction Automation (Playwright).
 
 Strategy: Simulate realistic user behaviour to reveal hidden / lazy content.
-Techniques: scroll automation, pagination clicking, dropdown interaction,
+Techniques: infinite scroll automation, pagination clicking, dropdown interaction,
 tab switching, lazy-load triggering.
 
-Tools: Playwright
+Enhanced with:
+  - Infinite scroll loop (scroll → wait → check for new content → repeat)
+  - Anti-detection fingerprint randomization (stealth_config)
+  - CAPTCHA detection and optional solving
+  - Proxy rotation support
+  - Self-healing selector store
+
+Tools: Playwright, stealth_config, captcha_handler
 Best for: infinite scroll pages, tabbed content, accordion menus, SPA navigation.
 """
 
@@ -15,7 +22,6 @@ import asyncio
 import logging
 import os
 import sqlite3
-import sys
 import time
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -23,9 +29,13 @@ from urllib.parse import urlparse
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
+
+# Max scroll iterations (configurable via env)
+MAX_SCROLL_ITERATIONS = int(os.environ.get("MAX_SCROLL_ITERATIONS", "50"))
+# Max time for scrolling in seconds
+MAX_SCROLL_TIME_S = int(os.environ.get("MAX_SCROLL_TIME_S", "120"))
 
 # ---------------------------------------------------------------------------
 # Self-healing selector store — persists per-domain selector hit/miss stats.
@@ -95,7 +105,7 @@ class _SelectorHitStore:
         return {r[0]: {"hits": r[1], "miss_streak": r[2]} for r in rows}
 
 
-def _get_selector_store(output_dir: str | None = None) -> "_SelectorHitStore | None":
+def _get_selector_store(output_dir: str | None = None) -> _SelectorHitStore | None:
     try:
         base = output_dir or os.environ.get("SCRAPER_OUTPUT_DIR", "/tmp/scraper_output")
         return _SelectorHitStore(os.path.join(base, "selector_hits.sqlite"))
@@ -104,22 +114,117 @@ def _get_selector_store(output_dir: str | None = None) -> "_SelectorHitStore | N
         return None
 
 
-async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
-    from engines import EngineResult
+async def _infinite_scroll(page, context, max_iterations: int = MAX_SCROLL_ITERATIONS) -> dict:
+    """
+    Scroll until no new content appears or limits are reached.
+
+    Returns a dict with scroll statistics:
+      iterations, new_elements_loaded, final_height, time_spent_s
+    """
+    stats = {
+        "iterations": 0,
+        "new_elements_loaded": 0,
+        "final_height": 0,
+        "time_spent_s": 0.0,
+    }
+
+    scroll_start = time.time()
+    prev_height = await page.evaluate("document.body.scrollHeight")
+    prev_element_count = await page.evaluate("document.querySelectorAll('*').length")
+    no_change_count = 0
+
+    for i in range(max_iterations):
+        # Check time limit
+        elapsed = time.time() - scroll_start
+        if elapsed > MAX_SCROLL_TIME_S:
+            logger.debug("[%s] Scroll time limit reached (%ds)", context.job_id, MAX_SCROLL_TIME_S)
+            break
+
+        # Scroll to bottom with smooth behavior
+        await page.evaluate("""
+            window.scrollTo({
+                top: document.body.scrollHeight,
+                behavior: 'smooth'
+            })
+        """)
+
+        # Wait for content to load
+        await page.wait_for_timeout(1500)
+
+        # Check for new content
+        new_height = await page.evaluate("document.body.scrollHeight")
+        new_element_count = await page.evaluate("document.querySelectorAll('*').length")
+
+        height_changed = new_height > prev_height
+        elements_changed = new_element_count > prev_element_count
+
+        if height_changed or elements_changed:
+            stats["new_elements_loaded"] += (new_element_count - prev_element_count)
+            no_change_count = 0
+            prev_height = new_height
+            prev_element_count = new_element_count
+        else:
+            no_change_count += 1
+            # Try clicking "Load more" buttons that may appear at bottom
+            _clicked_more = False
+            load_more_selectors = [
+                "button:has-text('Load more')", "button:has-text('Show more')",
+                "button:has-text('View more')", "a:has-text('Load more')",
+                ".load-more", "[data-testid*='load-more']",
+                "button:has-text('See more')",
+            ]
+            for sel in load_more_selectors:
+                try:
+                    btn = await page.wait_for_selector(sel, state="visible", timeout=1000)
+                    if btn:
+                        await btn.scroll_into_view_if_needed()
+                        await btn.click()
+                        await page.wait_for_timeout(2000)
+                        _clicked_more = True
+                        no_change_count = 0
+                        break
+                except Exception:
+                    pass
+
+            if not _clicked_more and no_change_count >= 2:
+                # Two consecutive checks with no new content — done
+                logger.debug(
+                    "[%s] Infinite scroll complete: no new content after %d checks",
+                    context.job_id, no_change_count,
+                )
+                break
+
+        stats["iterations"] = i + 1
+
+    stats["final_height"] = await page.evaluate("document.body.scrollHeight")
+    stats["time_spent_s"] = round(time.time() - scroll_start, 2)
+
+    # Scroll back to top for final capture
+    await page.evaluate("window.scrollTo(0, 0)")
+    await page.wait_for_timeout(500)
+
+    return stats
+
+
+async def _run_async(url: str, context: EngineContext) -> EngineResult:
+
     from bs4 import BeautifulSoup
-    from urllib.parse import urljoin
-    from utils import DEFAULT_HEADERS
+
+    from engines import EngineResult
+    from utils import get_proxy
 
     start = time.time()
     engine_id = "dom_interaction"
     engine_name = "DOM Interaction Automation (Playwright scroll/paginate)"
+    warnings: list[str] = []
 
     # Self-healing selector store
     _domain = urlparse(url).netloc
     _sel_store = _get_selector_store(getattr(context, "raw_output_dir", None))
 
     try:
-        from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+        from playwright.async_api import TimeoutError as PWTimeout
+        from playwright.async_api import async_playwright
     except ImportError:
         return EngineResult(
             engine_id=engine_id, engine_name=engine_name, url=url,
@@ -129,17 +234,26 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
     collected_html_snapshots: list[str] = []
 
     try:
+        # --- Stealth context options ---
+        from stealth_config import apply_stealth_scripts, get_stealth_context_options
+
+        stealth_opts = get_stealth_context_options()
+
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
             )
             try:
-                bctx = await browser.new_context(
-                    user_agent=DEFAULT_HEADERS["User-Agent"],
-                    viewport={"width": 1280, "height": 900},
-                    java_script_enabled=True,
-                )
+                ctx_opts = {**stealth_opts}
+
+                # Proxy support
+                _proxy = get_proxy()
+                if _proxy:
+                    ctx_opts["proxy"] = {"server": _proxy}
+
+                bctx = await browser.new_context(**ctx_opts)
+
                 if context.auth_cookies:
                     parsed = urlparse(url)
                     cookie_list = [
@@ -148,13 +262,16 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                     ]
                     await bctx.add_cookies(cookie_list)
 
+                # Inject storageState if available
+                if getattr(context, "auth_storage_state_data", None):
+                    storage = context.auth_storage_state_data
+                    if storage.get("cookies"):
+                        await bctx.add_cookies(storage["cookies"])
+
                 page = await bctx.new_page()
 
-                try:
-                    from playwright_stealth import stealth_async
-                    await stealth_async(page)
-                except ImportError:
-                    pass
+                # Apply deep stealth scripts
+                await apply_stealth_scripts(page)
 
                 status_code = 0
                 final_url = url
@@ -169,30 +286,43 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                 if status_code >= 400:
                     raise RuntimeError(f"HTTP {status_code}")
 
+                # --- CAPTCHA detection ---
+                try:
+                    from captcha_handler import detect_captcha, solve_captcha
+                    initial_html = await page.content()
+                    captcha_info = detect_captcha(initial_html, url)
+                    if captcha_info.detected:
+                        logger.info("[%s] CAPTCHA detected in dom_interaction: %s",
+                                    context.job_id, captcha_info.captcha_type)
+                        solved = await solve_captcha(page, captcha_info)
+                        warnings.extend(captcha_info.warnings)
+                        if solved:
+                            warnings.append(f"CAPTCHA ({captcha_info.captcha_type}) solved")
+                        else:
+                            warnings.append(f"CAPTCHA ({captcha_info.captcha_type}) not solved")
+                except ImportError:
+                    pass
+
                 # Initial settle
                 await page.wait_for_timeout(1500)
                 collected_html_snapshots.append(await page.content())
 
                 # --- INTERACTION SEQUENCE ---
 
-                # 1. Gradual scroll through the page (triggers lazy loading)
-                page_height = await page.evaluate("document.body.scrollHeight")
-                scroll_step = max(300, page_height // 10)
-                current_pos = 0
-                while current_pos < page_height:
-                    current_pos = min(current_pos + scroll_step, page_height)
-                    await page.evaluate(f"window.scrollTo(0, {current_pos})")
-                    await page.wait_for_timeout(400)  # Realistic pacing
-
-                # Wait for lazy images to load
-                await page.wait_for_timeout(1500)
+                # 1. INFINITE SCROLL — scroll until no new content
+                # Cap scroll time to engine timeout minus 10s for parsing
+                _scroll_budget = max(5, min(MAX_SCROLL_TIME_S, context.timeout - 10))
+                scroll_stats = await _infinite_scroll(page, context, max_iterations=min(MAX_SCROLL_ITERATIONS, _scroll_budget // 2))
                 collected_html_snapshots.append(await page.content())
 
-                # 2. Scroll back to top
-                await page.evaluate("window.scrollTo(0, 0)")
-                await page.wait_for_timeout(500)
+                logger.info(
+                    "[%s] Infinite scroll: %d iterations, %d new elements, %.1fs",
+                    context.job_id, scroll_stats["iterations"],
+                    scroll_stats["new_elements_loaded"],
+                    scroll_stats["time_spent_s"],
+                )
 
-                # 3. Click visible pagination / "load more" buttons
+                # 2. Click visible pagination / "load more" / "next" buttons
                 pagination_selectors = [
                     "button[class*='next']", "a[class*='next']",
                     "button[class*='load-more']", "[aria-label*='next' i]",
@@ -238,7 +368,7 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                         "[%s] No pagination selector matched on %s", context.job_id, _domain
                     )
 
-                # 4. Open visible dropdowns / accordions
+                # 3. Open visible dropdowns / accordions
                 expand_selectors = [
                     "[aria-expanded='false']", "[data-toggle='collapse']",
                     "details summary", ".accordion-button",
@@ -268,13 +398,21 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
 
         # Parse with production-grade parser functions
         soup = BeautifulSoup(primary_html, "lxml")
-        from parser import (
-            parse_headings, parse_images as _parse_images,
-            parse_links as _parse_links, parse_forms,
-            parse_json_ld, parse_opengraph, parse_semantic_zones,
-            parse_main_content,
-        )
         from normalizer import _detect_language_from_html
+        from parser import (
+            parse_forms,
+            parse_headings,
+            parse_json_ld,
+            parse_main_content,
+            parse_opengraph,
+            parse_semantic_zones,
+        )
+        from parser import (
+            parse_images as _parse_images,
+        )
+        from parser import (
+            parse_links as _parse_links,
+        )
 
         # Title fallback chain
         title_text = ""
@@ -311,6 +449,7 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
             success=True, html=primary_html, text=plain_text,
             status_code=status_code, final_url=final_url, content_type=ct,
             elapsed_s=time.time() - start,
+            warnings=warnings,
             data={
                 "title": title_text,
                 "headings": headings,
@@ -323,6 +462,7 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
                 "semantic_zones": semantic_zones,
                 "language": language,
                 "interaction_snapshots": len(collected_html_snapshots),
+                "scroll_stats": scroll_stats,
                 "selector_stats": (_sel_store.stats(_domain) if _sel_store else {}),
             },
         )
@@ -332,10 +472,11 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
         return EngineResult(
             engine_id=engine_id, engine_name=engine_name, url=url,
             success=False, error=str(exc), elapsed_s=time.time() - start,
+            warnings=warnings,
         )
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
+def run(url: str, context: EngineContext) -> EngineResult:
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
         return _pool.submit(asyncio.run, _run_async(url, context)).result()

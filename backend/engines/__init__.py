@@ -10,10 +10,10 @@ EngineResult is the normalised container returned by every engine.
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
-
 
 # ---------------------------------------------------------------------------
 # Shared context passed into every engine
@@ -30,17 +30,25 @@ class EngineContext:
     skip_engines: list[str] = field(default_factory=list)
     respect_robots: bool = True
     auth_cookies: dict = field(default_factory=dict)   # Engine F session cookies
-    auth_storage_state: Optional[str] = None           # Playwright storageState path
-    credentials: Optional[dict] = None                 # {"username": ..., "password": ...}
+    auth_storage_state: str | None = None           # Playwright storageState path
+    auth_storage_state_data: dict | None = None     # Full Playwright storageState dict
+    credentials: dict | None = None                 # {"username": ..., "password": ...}
     raw_output_dir: str = "/tmp/scraper_raw"
     timeout: int = 30                      # seconds per engine
     playwright_browser: Any = None         # Shared browser instance (injected by orchestrator)
     extra: dict = field(default_factory=dict)
 
+    # Cooperative cancellation — set by orchestrator to stop engine threads
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
     # Runtime state — populated as engines run
     site_type: str = "unknown"             # "static" | "spa" | "api_driven" | "mixed"
     initial_html: str = ""                 # Cached from first static fetch
     initial_status: int = 0
+
+    def is_cancelled(self) -> bool:
+        """Check if this engine should stop execution."""
+        return self.cancel_event.is_set()
 
 
 # ---------------------------------------------------------------------------
@@ -61,10 +69,10 @@ class EngineResult:
     status_code: int = 0
     final_url: str = ""
     content_type: str = ""
-    error: Optional[str] = None
+    error: str | None = None
     warnings: list[str] = field(default_factory=list)
     elapsed_s: float = 0.0
-    screenshot_path: Optional[str] = None
+    screenshot_path: str | None = None
     extra: dict = field(default_factory=dict)
 
 

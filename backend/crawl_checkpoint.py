@@ -32,11 +32,8 @@ import heapq
 import json
 import logging
 import os
-import sqlite3
 import time
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -46,7 +43,7 @@ _CHECKPOINT_INTERVAL = int(os.environ.get("CRAWL_CHECKPOINT_INTERVAL", "25"))
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class CrawlCheckpoint:
@@ -59,19 +56,9 @@ class CrawlCheckpoint:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._init_db()
 
-    @contextmanager
     def _conn(self):
-        con = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False)
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA journal_mode=WAL")
-        try:
-            yield con
-            con.commit()
-        except Exception:
-            con.rollback()
-            raise
-        finally:
-            con.close()
+        from db_pool import get_connection
+        return get_connection(self._db_path)
 
     def _init_db(self) -> None:
         with self._conn() as con:
@@ -89,7 +76,7 @@ class CrawlCheckpoint:
 
     # ------------------------------------------------------------------ I/O
 
-    def load(self) -> Optional[dict]:
+    def load(self) -> dict | None:
         """
         Load checkpoint for this job.
         Returns None if no checkpoint exists (fresh crawl).
@@ -188,7 +175,7 @@ class CrawlDelayThrottle:
     Falls back to a configurable default delay.
     """
 
-    def __init__(self, default_delay_s: float = 1.0):
+    def __init__(self, default_delay_s: float = 0.25):
         self._delays: dict[str, float] = {}
         self._last_fetch: dict[str, float] = {}
         self._default_delay = default_delay_s
@@ -280,7 +267,6 @@ def discover_rss_urls(
 
 def _parse_feed_for_urls(xml_text: str, base_url: str) -> list[str]:
     """Extract <link> or <url> elements from RSS/Atom XML."""
-    from urllib.parse import urljoin
     urls: list[str] = []
     try:
         from bs4 import BeautifulSoup
@@ -305,14 +291,15 @@ def _parse_feed_for_urls(xml_text: str, base_url: str) -> list[str]:
 # Canonical URL deduplication helper
 # ---------------------------------------------------------------------------
 
-def resolve_canonical(url: str, html: str) -> Optional[str]:
+def resolve_canonical(url: str, html: str) -> str | None:
     """
     Extract the canonical URL from a page's HTML.
     Returns None if no canonical tag found.
     """
     try:
-        from bs4 import BeautifulSoup
         from urllib.parse import urljoin
+
+        from bs4 import BeautifulSoup
         soup = BeautifulSoup(html[:16384], "lxml")
         tag = soup.find("link", rel=lambda r: r and "canonical" in r)
         if tag and tag.get("href"):

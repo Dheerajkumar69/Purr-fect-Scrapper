@@ -14,22 +14,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
+from config import MAX_SCREENSHOT_BYTES
 
-async def _capture_screenshot(url: str, context: "EngineContext") -> tuple[bytes, int, str]:
+
+async def _capture_screenshot(url: str, context: EngineContext) -> tuple[bytes, int, str]:
     """Return (png_bytes, status_code, final_url)."""
+    from playwright.async_api import async_playwright
+
     from utils import DEFAULT_HEADERS
-    from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -55,8 +56,13 @@ async def _capture_screenshot(url: str, context: "EngineContext") -> tuple[bytes
             status_code = 0
             final_url = url
 
-            nav_resp = await page.goto(url, wait_until="networkidle",
+            nav_resp = await page.goto(url, wait_until="domcontentloaded",
                                        timeout=context.timeout * 1000)
+            # Best-effort networkidle — don't hang on WebSocket/analytics sites
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
             if nav_resp:
                 status_code = nav_resp.status
 
@@ -81,11 +87,12 @@ async def _capture_screenshot(url: str, context: "EngineContext") -> tuple[bytes
 def _ocr_image(png_bytes: bytes) -> str:
     """Apply OpenCV preprocessing + Tesseract OCR to PNG bytes."""
     try:
-        import numpy as np
-        import cv2
-        from PIL import Image
-        import pytesseract
         import io
+
+        import cv2
+        import numpy as np
+        import pytesseract
+        from PIL import Image
 
         # Load image
         img_array = np.frombuffer(png_bytes, dtype=np.uint8)
@@ -117,9 +124,10 @@ def _ocr_image(png_bytes: bytes) -> str:
         logger.warning("OCR dependency missing: %s", missing)
         # Fallback: pure PIL + pytesseract without OpenCV
         try:
+            import io
+
             import pytesseract
             from PIL import Image
-            import io
             pil_img = Image.open(io.BytesIO(png_bytes))
             return pytesseract.image_to_string(pil_img, lang="eng")
         except Exception:
@@ -135,9 +143,10 @@ def _ocr_image_recovery(png_bytes: bytes) -> str:
     PSM 6 (assume single uniform text block) for pages that PSM 1 misses.
     """
     try:
-        from PIL import Image
-        import pytesseract
         import io
+
+        import pytesseract
+        from PIL import Image
 
         pil_img = Image.open(io.BytesIO(png_bytes)).convert("L")  # greyscale
         # 2× upscale with high-quality resampling
@@ -152,7 +161,7 @@ def _ocr_image_recovery(png_bytes: bytes) -> str:
         return ""
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
+def run(url: str, context: EngineContext) -> EngineResult:
     from engines import EngineResult
 
     start = time.time()
@@ -209,6 +218,18 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
             return EngineResult(
                 engine_id=engine_id, engine_name=engine_name, url=url,
                 success=False, error="Screenshot capture returned empty bytes.",
+                elapsed_s=time.time() - start,
+            )
+
+        if len(png_bytes) > MAX_SCREENSHOT_BYTES:
+            return EngineResult(
+                engine_id=engine_id, engine_name=engine_name, url=url,
+                success=False,
+                error=(
+                    f"Screenshot {len(png_bytes) // (1024 * 1024)} MB "
+                    f"exceeds MAX_SCREENSHOT_BYTES "
+                    f"({MAX_SCREENSHOT_BYTES // (1024 * 1024)} MB)."
+                ),
                 elapsed_s=time.time() - start,
             )
 

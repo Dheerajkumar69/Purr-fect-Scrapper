@@ -6,11 +6,10 @@ middleware, and error handling, without hitting the real network
 (scraper and robots.txt check are mocked).
 """
 
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+from unittest.mock import MagicMock, patch
 
 import pytest
-from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 # We need to import the app.  main.py does sys.path manipulation itself,
@@ -47,7 +46,7 @@ def _scrape_payload(**kwargs):
 @pytest.fixture(autouse=True)
 def mock_robots_ok():
     """Patch check_robots_txt to return (True, '') for every test by default."""
-    with patch("main.check_robots_txt", return_value=(True, "")):
+    with patch("routes.scrape.check_robots_txt", return_value=(True, "")):
         yield
 
 
@@ -93,7 +92,7 @@ def test_unknown_option_returns_422():
 
 def test_empty_options_still_accepted():
     """Empty options list is valid (returns empty data dict)."""
-    with patch("main.auto_scrape", return_value=MOCK_RESULT):
+    with patch("routes.scrape.auto_scrape", return_value=MOCK_RESULT):
         r = client.post("/scrape", json={"url": "https://example.com", "options": []})
     assert r.status_code == 200
     assert r.json()["data"] == {}
@@ -101,7 +100,7 @@ def test_empty_options_still_accepted():
 
 def test_null_custom_css_accepted():
     """Frontend sends null for custom_css/xpath when unchecked — must not 422."""
-    with patch("main.auto_scrape", return_value=MOCK_RESULT):
+    with patch("routes.scrape.auto_scrape", return_value=MOCK_RESULT):
         r = client.post("/scrape", json={
             "url": "https://example.com",
             "options": ["title"],
@@ -140,7 +139,7 @@ def test_metadata_ip_rejected():
 
 def test_robots_txt_blocked_returns_403():
     """When robots.txt disallows crawling the URL, the API must return 403."""
-    with patch("main.check_robots_txt", return_value=(False, "robots.txt disallows this URL")):
+    with patch("routes.scrape.check_robots_txt", return_value=(False, "robots.txt disallows this URL")):
         r = client.post("/scrape", json=_scrape_payload())
     assert r.status_code == 403
     assert "robots" in r.json().get("detail", "").lower()
@@ -149,8 +148,8 @@ def test_robots_txt_blocked_returns_403():
 def test_robots_txt_unreachable_emits_warning():
     """When robots.txt can't be fetched (soft failure), scrape continues with a warning."""
     warning_msg = "robots.txt unreachable; proceeding with caution."
-    with patch("main.check_robots_txt", return_value=(True, warning_msg)):
-        with patch("main.auto_scrape", return_value=MOCK_RESULT):
+    with patch("routes.scrape.check_robots_txt", return_value=(True, warning_msg)):
+        with patch("routes.scrape.auto_scrape", return_value=MOCK_RESULT):
             r = client.post("/scrape", json=_scrape_payload())
     assert r.status_code == 200
     body = r.json()
@@ -160,8 +159,8 @@ def test_robots_txt_unreachable_emits_warning():
 def test_respect_robots_false_bypasses_block():
     """respect_robots=False must skip the robots.txt check entirely."""
     # check_robots_txt is NOT called — if it were, it would return (False, ...) and block.
-    with patch("main.check_robots_txt", return_value=(False, "blocked by robots")) as mock_rb:
-        with patch("main.auto_scrape", return_value=MOCK_RESULT):
+    with patch("routes.scrape.check_robots_txt", return_value=(False, "blocked by robots")) as mock_rb:
+        with patch("routes.scrape.auto_scrape", return_value=MOCK_RESULT):
             r = client.post("/scrape", json=_scrape_payload(respect_robots=False))
     assert r.status_code == 200
     mock_rb.assert_not_called()
@@ -173,7 +172,7 @@ def test_respect_robots_false_bypasses_block():
 
 
 def test_successful_scrape_returns_200():
-    with patch("main.auto_scrape", return_value=MOCK_RESULT):
+    with patch("routes.scrape.auto_scrape", return_value=MOCK_RESULT):
         r = client.post("/scrape", json=_scrape_payload())
     assert r.status_code == 200
     body = r.json()
@@ -187,13 +186,13 @@ def test_successful_scrape_returns_200():
 
 
 def test_scrape_response_has_request_id_header():
-    with patch("main.auto_scrape", return_value=MOCK_RESULT):
+    with patch("routes.scrape.auto_scrape", return_value=MOCK_RESULT):
         r = client.post("/scrape", json=_scrape_payload())
     assert "x-request-id" in r.headers
 
 
 def test_custom_request_id_echoed():
-    with patch("main.auto_scrape", return_value=MOCK_RESULT):
+    with patch("routes.scrape.auto_scrape", return_value=MOCK_RESULT):
         r = client.post(
             "/scrape",
             json=_scrape_payload(),
@@ -204,11 +203,26 @@ def test_custom_request_id_echoed():
 
 def test_force_dynamic_flag_forwarded():
     """Verify force_dynamic=True is passed through to auto_scrape."""
-    with patch("main.auto_scrape", return_value=MOCK_RESULT) as mock_fn:
+    with patch("routes.scrape.auto_scrape", return_value=MOCK_RESULT) as mock_fn:
         client.post("/scrape", json=_scrape_payload(force_dynamic=True))
     mock_fn.assert_called_once()
     _, called_force = mock_fn.call_args.args
     assert called_force is True
+
+
+def test_v1_semaphore_lazy_init_prevents_500():
+    """/scrape must work even when lifespan did not initialize _V1_SEMAPHORE."""
+    import main as main_mod
+
+    previous = main_mod.deps.V1_SEMAPHORE
+    main_mod.deps.V1_SEMAPHORE = None
+    try:
+        with patch("routes.scrape.auto_scrape", return_value=MOCK_RESULT):
+            r = client.post("/scrape", json=_scrape_payload())
+    finally:
+        main_mod.deps.V1_SEMAPHORE = previous
+
+    assert r.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -217,14 +231,14 @@ def test_force_dynamic_flag_forwarded():
 
 
 def test_scraper_value_error_returns_422():
-    with patch("main.auto_scrape", side_effect=ValueError("non-HTML content")):
+    with patch("routes.scrape.auto_scrape", side_effect=ValueError("non-HTML content")):
         r = client.post("/scrape", json=_scrape_payload())
     assert r.status_code == 422
     assert "non-HTML" in r.json().get("detail", "")
 
 
 def test_scraper_generic_error_returns_502():
-    with patch("main.auto_scrape", side_effect=RuntimeError("connection refused")):
+    with patch("routes.scrape.auto_scrape", side_effect=RuntimeError("connection refused")):
         r = client.post("/scrape", json=_scrape_payload())
     assert r.status_code == 502
 

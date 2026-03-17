@@ -24,10 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -37,7 +34,7 @@ _MIN_RUNS_FOR_SKIP = 3      # don't skip until we've seen ≥3 jobs on this doma
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _domain_from_url(url: str) -> str:
@@ -53,20 +50,9 @@ class DomainProfileStore:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._init_db()
 
-    @contextmanager
     def _conn(self):
-        con = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False)
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA journal_mode=WAL")
-        con.execute("PRAGMA synchronous=NORMAL")
-        try:
-            yield con
-            con.commit()
-        except Exception:
-            con.rollback()
-            raise
-        finally:
-            con.close()
+        from db_pool import get_connection
+        return get_connection(self._db_path)
 
     def _init_db(self) -> None:
         with self._conn() as con:
@@ -129,7 +115,7 @@ class DomainProfileStore:
     def get_for_url(self, url: str) -> dict:
         return self.get(_domain_from_url(url))
 
-    def get_preferred_engines(self, domain: str) -> Optional[list[str]]:
+    def get_preferred_engines(self, domain: str) -> list[str] | None:
         """
         Return ordered list of engine_ids sorted by success rate, or None
         if we have fewer than MIN_RUNS_FOR_SKIP observations (not enough data).
@@ -220,7 +206,7 @@ class DomainProfileStore:
         self._upsert_profile(domain, profile.get("engine_scores", {}),
                              profile, field_accuracy=fa)
 
-    def get_best_engine_for_field(self, domain: str, field: str) -> Optional[str]:
+    def get_best_engine_for_field(self, domain: str, field: str) -> str | None:
         """
         Return the engine_id with the highest per-field success rate for
         a given domain+field combination, or None if not enough data.
@@ -327,8 +313,8 @@ class DomainProfileStore:
         self._upsert_profile(domain, scores, profile)
 
     def _upsert_profile(self, domain: str, scores: dict,
-                         profile: Optional[dict] = None,
-                         field_accuracy: Optional[dict] = None) -> None:
+                         profile: dict | None = None,
+                         field_accuracy: dict | None = None) -> None:
         existing = profile or self.get(domain)
         fa = field_accuracy if field_accuracy is not None else existing.get("field_accuracy", {})
         with self._conn() as con:
@@ -367,8 +353,5 @@ class DomainProfileStore:
         existing_notes = profile.get("notes", "")
         notes_set = set(n.strip() for n in existing_notes.split(",") if n.strip())
         notes_set.add(note)
-        with self._conn() as con:
-            con.execute(
-                "UPDATE domain_profiles SET notes=?, last_updated=? WHERE domain=?",
-                (",".join(sorted(notes_set)), _now(), domain),
-            )
+        profile["notes"] = ",".join(sorted(notes_set))
+        self._upsert_profile(domain, profile.get("engine_scores", {}), profile)

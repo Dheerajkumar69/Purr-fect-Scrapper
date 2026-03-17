@@ -11,8 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from engines import EngineResult
@@ -553,7 +552,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
 def write_html_report(
     merged: dict,
-    engine_results: "list[EngineResult]",
+    engine_results: list[EngineResult],
     job_id: str,
     output_dir: str,
 ) -> str:

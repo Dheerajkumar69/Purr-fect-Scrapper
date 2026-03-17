@@ -7,20 +7,16 @@ Tests 5 required scenarios: static site, SPA, infinite scroll, login-protected,
 and SEO metadata-rich pages.
 """
 
-import os
-import sys
 import json
+import os
 import tempfile
-import time
-import pytest
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import pytest
 
 from engines import EngineContext, EngineResult
-from normalizer import normalize
 from merger import merge
-
+from normalizer import normalize
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -172,7 +168,6 @@ class TestIntegrationInfiniteScroll:
 
     def test_dom_interaction_reports_multiple_snapshots(self):
         """DOM interaction engine should capture multiple HTML snapshots during scrolling."""
-        from engines.engine_dom_interaction import run
         ctx = EngineContext(job_id="integ_scroll", url="https://example.com", timeout=15)
 
         # Mock Playwright to simulate scroll interaction
@@ -488,16 +483,17 @@ class TestIntegrationPolicyMessage:
     @pytest.fixture(autouse=True)
     def _disable_rate_limit(self):
         import main as _main
-        _main.limiter.enabled = False
+        _main.deps.limiter.enabled = False
         yield
-        _main.limiter.enabled = True
+        _main.deps.limiter.enabled = True
 
     def test_robots_block_has_policy_message(self):
         from fastapi.testclient import TestClient
+
         from main import app
 
         client = TestClient(app, raise_server_exceptions=False)
-        with patch("main.check_robots_txt", return_value=(False, "robots.txt disallows /")):
+        with patch("routes.scrape.check_robots_txt", return_value=(False, "robots.txt disallows /")):
             r = client.post("/scrape", json={"url": "https://example.com", "options": ["title"]})
 
         assert r.status_code == 403
@@ -505,10 +501,11 @@ class TestIntegrationPolicyMessage:
 
     def test_robots_block_v2_has_policy_message(self):
         from fastapi.testclient import TestClient
+
         from main import app
 
         client = TestClient(app, raise_server_exceptions=False)
-        with patch("main.check_robots_txt", return_value=(False, "robots.txt block")):
+        with patch("routes.scrape.check_robots_txt", return_value=(False, "robots.txt block")):
             r = client.post("/scrape/v2", json={
                 "url": "https://example.com",
                 "engines": ["static_requests"],

@@ -11,28 +11,27 @@ Best for: minimal environments, dependency isolation testing.
 from __future__ import annotations
 
 import logging
-import os
-import sys
 import time
-from typing import TYPE_CHECKING
 import urllib.request
-from urllib.request import Request as URequest, urlopen
-from urllib.error import URLError, HTTPError as UHTTPError
+from typing import TYPE_CHECKING
+from urllib.error import HTTPError as UHTTPError
+from urllib.request import Request as URequest
+from urllib.request import urlopen
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
 _MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
-    from engines import EngineResult
+def run(url: str, context: EngineContext) -> EngineResult:
     from bs4 import BeautifulSoup
-    from utils import get_random_ua, get_proxy, is_html_content_type
+
+    from engines import EngineResult
+    from utils import get_proxy, get_random_ua, is_html_content_type
 
     start = time.time()
     engine_id = "static_urllib"
@@ -71,7 +70,17 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
                     error=f"Non-HTML content-type: {ct}", elapsed_s=time.time() - start,
                 )
 
-            raw_bytes = resp.read(_MAX_BYTES)
+            chunks = []
+            total = 0
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_BYTES:
+                    raise ValueError(f"Response exceeds {_MAX_BYTES} bytes — aborted")
+                chunks.append(chunk)
+            raw_bytes = b"".join(chunks)
 
         # Charset from content-type header
         charset = "utf-8"
@@ -84,13 +93,21 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
         html = raw_bytes.decode(charset, errors="replace")
 
         # Use production parser functions for full extraction (consistent with static_requests)
-        from parser import (
-            parse_headings, parse_images as _parse_images,
-            parse_links as _parse_links, parse_forms,
-            parse_json_ld, parse_opengraph, parse_semantic_zones,
-            parse_main_content,
-        )
         from normalizer import _detect_language_from_html
+        from parser import (
+            parse_forms,
+            parse_headings,
+            parse_json_ld,
+            parse_main_content,
+            parse_opengraph,
+            parse_semantic_zones,
+        )
+        from parser import (
+            parse_images as _parse_images,
+        )
+        from parser import (
+            parse_links as _parse_links,
+        )
 
         soup = BeautifulSoup(html, "lxml")
         title_tag = soup.find("title")

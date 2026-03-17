@@ -8,12 +8,8 @@ These tests require a working internet connection and may be slow.
 They exist to validate end-to-end engine functionality against real sites.
 """
 
+
 import pytest
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
 
 # ---------------------------------------------------------------------------
 # Static site test
@@ -22,8 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 @pytest.mark.live
 def test_live_static_site():
     """Scrape https://example.com and verify basic extraction."""
-    from engines.engine_static_requests import run as run_static
     from engines import EngineContext
+    from engines.engine_static_requests import run as run_static
 
     ctx = EngineContext(
         job_id="live-static",
@@ -66,8 +62,8 @@ def test_live_site_analysis():
 @pytest.mark.live
 def test_live_structured_metadata():
     """Verify structured metadata extraction from a site with OpenGraph tags."""
-    from engines.engine_structured_metadata import run as run_meta
     from engines import EngineContext
+    from engines.engine_structured_metadata import run as run_meta
 
     ctx = EngineContext(
         job_id="live-meta",
@@ -97,8 +93,8 @@ def test_live_structured_metadata():
 @pytest.mark.live
 def test_live_normalizer():
     """End-to-end: scrape → normalize → verify unified schema."""
-    from engines.engine_static_requests import run as run_static
     from engines import EngineContext
+    from engines.engine_static_requests import run as run_static
     from normalizer import normalize
 
     ctx = EngineContext(

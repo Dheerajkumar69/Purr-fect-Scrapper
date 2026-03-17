@@ -12,22 +12,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import sys
 import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
 
-async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
+async def _run_async(url: str, context: EngineContext) -> EngineResult:
     from engines import EngineResult
-    from utils import get_random_ua, get_proxy, MAX_CONTENT_LENGTH, is_html_content_type
+    from utils import MAX_CONTENT_LENGTH, get_proxy, get_random_ua, is_html_content_type
 
     start = time.time()
     engine_id = "static_httpx"
@@ -53,19 +50,26 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
             http2=True,
             proxy=_proxy if _proxy else None,
         ) as client:
-            resp = await client.get(url)
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
 
-        resp.raise_for_status()
+                ct = resp.headers.get("content-type", "")
+                if not is_html_content_type(ct):
+                    return EngineResult(
+                        engine_id=engine_id, engine_name=engine_name, url=url,
+                        success=False, status_code=resp.status_code,
+                        error=f"Non-HTML content-type: {ct}", elapsed_s=time.time() - start,
+                    )
 
-        ct = resp.headers.get("content-type", "")
-        if not is_html_content_type(ct):
-            return EngineResult(
-                engine_id=engine_id, engine_name=engine_name, url=url,
-                success=False, status_code=resp.status_code,
-                error=f"Non-HTML content-type: {ct}", elapsed_s=time.time() - start,
-            )
+                chunks = []
+                total = 0
+                async for chunk in resp.aiter_bytes(chunk_size=65536):
+                    total += len(chunk)
+                    if total > MAX_CONTENT_LENGTH:
+                        raise ValueError(f"Response exceeds {MAX_CONTENT_LENGTH} bytes — aborted")
+                    chunks.append(chunk)
+                raw_bytes = b"".join(chunks)
 
-        raw_bytes = resp.content[:MAX_CONTENT_LENGTH]
         html = raw_bytes.decode(resp.encoding or "utf-8", errors="replace")
 
         # Use html5lib for permissive parsing
@@ -75,13 +79,21 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
             soup = BeautifulSoup(html, "lxml")
 
         # Use production parser functions for full extraction (consistent with static_requests)
-        from parser import (
-            parse_headings, parse_images as _parse_images,
-            parse_links as _parse_links, parse_forms,
-            parse_json_ld, parse_opengraph, parse_semantic_zones,
-            parse_main_content,
-        )
         from normalizer import _detect_language_from_html
+        from parser import (
+            parse_forms,
+            parse_headings,
+            parse_json_ld,
+            parse_main_content,
+            parse_opengraph,
+            parse_semantic_zones,
+        )
+        from parser import (
+            parse_images as _parse_images,
+        )
+        from parser import (
+            parse_links as _parse_links,
+        )
 
         title_tag = soup.find("title")
         title_text = title_tag.get_text(strip=True) if title_tag else ""
@@ -134,7 +146,7 @@ async def _run_async(url: str, context: "EngineContext") -> "EngineResult":
         )
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
+def run(url: str, context: EngineContext) -> EngineResult:
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(_run_async(url, context))

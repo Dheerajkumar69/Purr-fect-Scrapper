@@ -18,16 +18,14 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class AuditLog:
@@ -43,19 +41,9 @@ class AuditLog:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._init_db()
 
-    @contextmanager
     def _conn(self):
-        con = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False)
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA journal_mode=WAL")
-        try:
-            yield con
-            con.commit()
-        except Exception:
-            con.rollback()
-            raise
-        finally:
-            con.close()
+        from db_pool import get_connection
+        return get_connection(self._db_path)
 
     def _init_db(self) -> None:
         with self._conn() as con:

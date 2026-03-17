@@ -17,13 +17,14 @@ A **modular, production-grade** web scraping platform that orchestrates **15 spe
 | **Circuit breaker** | Mass-failure detection stops remaining engines early |
 | **SSE real-time streaming** | Live progress events streamed to the frontend via Server-Sent Events |
 | **6 report formats** | JSON, HTML, CSV, XLSX, GraphML, HAR |
-| **Celery workers** | Async job execution via Redis broker with retry and stale-job cleanup |
+| **Memory Guards** | Per-engine thread physical RSS memory caps preventing OOM crashes |
+| **SQLite Connection Pooling** | Thread-safe connection pool with WAL for concurrent reads/writes |
 | **SSRF protection** | DNS rebinding guard, all RFC-1918/5737 private IPs blocked |
 | **robots.txt compliance** | Hard 403 when explicitly disallowed; soft warning when unreachable |
 | **Rate limiting** | 30 req/min per IP (slowapi) |
 | **Versioned history** | Time-series of scrape results per URL with structural redesign detection |
 | **Audit log** | Per-field extraction decision tracking with queryable SQLite store |
-| **Docker support** | Multi-stage Dockerfile, non-root user, healthcheck, Docker Compose |
+| **Docker support** | Multi-stage Dockerfile, non-root user, healthcheck, CI/CD pipelines |
 | **Beautiful dark-mode UI** | Engine selector, live progress, confidence panel, JSON viewer |
 
 ---
@@ -49,8 +50,9 @@ scrapperproject/
 │   ├── history_store.py         # Versioned scrape history with diff detection
 │   ├── domain_profile.py        # Adaptive per-domain engine learning
 │   ├── crawl_checkpoint.py      # BFS crawl state persistence + crawl-delay
-│   ├── celery_app.py            # Celery application config
-│   ├── celery_tasks.py          # Celery task definitions
+│   ├── resource_monitor.py      # MemoryGuard context limiters
+│   ├── db_pool.py               # Thread-safe SQLite connection pool
+│   ├── dependencies.py          # Fast API state semaphores + deps
 │   ├── engines/
 │   │   ├── __init__.py          # EngineContext, EngineResult, ENGINE_IDS
 │   │   ├── engine_retry.py      # Reusable retry wrapper with exponential backoff
@@ -129,14 +131,11 @@ cp .env.example .env          # edit as needed
 docker compose up --build -d
 ```
 
-This starts 4 services:
+This starts the containerized service:
 
 | Service | Container | Purpose |
 |---|---|---|
-| `scraper` | `scraper` | FastAPI API + frontend (port 8000) |
-| `celery_worker` | `scraper_celery` | Async job execution (4 concurrent) |
-| `celery_beat` | `scraper_beat` | Periodic stale-job cleanup |
-| `redis` | `scraper_redis` | Message broker + result backend |
+| `scraper` | `scraper` | FastAPI HTTP Server + multi-threaded scraping engines (port 8000) |
 
 ---
 
@@ -253,7 +252,7 @@ source ../.venv/bin/activate
 pytest tests/ -v
 ```
 
-Expected: **389+ passed** in ~90 s.
+Expected: **666+ passed** in ~40 s.
 
 ---
 

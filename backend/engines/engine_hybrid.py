@@ -11,26 +11,23 @@ This engine is the "smart dispatcher" for single-URL quick scraping.
 from __future__ import annotations
 
 import logging
-import os
-import sys
 import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
 _MIN_TEXT_LENGTH = 200   # Below this we consider extraction insufficient
 
 
-def _has_enough_content(result: "EngineResult") -> bool:
+def _has_enough_content(result: EngineResult) -> bool:
     return result.success and len(result.text or "") >= _MIN_TEXT_LENGTH
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
+def run(url: str, context: EngineContext) -> EngineResult:
     from engines import EngineResult
 
     start = time.time()
@@ -39,7 +36,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
 
     attempt_log: list[dict] = []
     warnings: list[str] = []
-    best_result: "EngineResult | None" = None
+    best_result: EngineResult | None = None
     best_engine_id: str = "none"
 
     # --- Step 1: Static requests (fastest) ---

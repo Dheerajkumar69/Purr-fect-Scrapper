@@ -18,15 +18,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
-import time
 import textwrap
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engines import EngineContext, EngineResult
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +93,7 @@ def _call_llm(text: str) -> dict:
     return json.loads(content)
 
 
-def run(url: str, context: "EngineContext") -> "EngineResult":
+def run(url: str, context: EngineContext) -> EngineResult:
     from engines import EngineResult
 
     start = time.time()
@@ -115,6 +113,7 @@ def run(url: str, context: "EngineContext") -> "EngineResult":
     if not html:
         try:
             import requests
+
             from utils import get_headers
             resp = requests.get(url, headers=get_headers(), timeout=context.timeout)
             resp.raise_for_status()
