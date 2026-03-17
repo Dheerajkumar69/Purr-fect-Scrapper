@@ -54,8 +54,6 @@ def execute_engines(
     def _run_one(engine_id: str, is_browser: bool = False) -> EngineResult:
         logger.info("[%s] Running engine: %s", job_id, engine_id)
         _retries = 0 if is_browser else 2
-        _engine_cancel = threading.Event()
-        context.cancel_event = _engine_cancel
         from resource_monitor import MemoryGuard
         try:
             module = importlib.import_module(f"engines.engine_{engine_id}")
@@ -67,7 +65,7 @@ def execute_engines(
                     with MemoryGuard(engine_id=engine_id):
                         result = _future.result(timeout=_HARD_ENGINE_TIMEOUT)
                 except Exception as _timeout_exc:
-                    _engine_cancel.set()
+                    context.cancel_event.set()
                     logger.warning(
                         "[%s] Engine %s exceeded hard timeout (%ds) — cancelled",
                         job_id, engine_id, _HARD_ENGINE_TIMEOUT,

@@ -1,0 +1,1 @@
+{"job_id":"6aa1498ef2c7460cb56216f015c05845","url":"http://httpbin.org/delay/10","status":"pending","poll_url":"/jobs/6aa1498ef2c7460cb56216f015c05845","stream_url":"/jobs/6aa1498ef2c7460cb56216f015c05845/stream"}

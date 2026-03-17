@@ -196,6 +196,15 @@ class JobQueue:
         with self._heap_not_empty:
             self._cancelled.add(job_id)
             self._paused.discard(job_id)
+        
+        # Actively try to signal the running job if it is currently executing
+        try:
+            from orchestrator import cancel_active_job
+            if cancel_active_job(job_id):
+                logger.info("JobQueue.cancel: signalled active execution halt for %s", job_id)
+        except Exception as e:
+            logger.warning("JobQueue.cancel: failed to signal orchestrator for %s: %s", job_id, e)
+
         logger.info("JobQueue.cancel job_id=%s", job_id)
         self._store.set_cancelled(job_id)
         return True

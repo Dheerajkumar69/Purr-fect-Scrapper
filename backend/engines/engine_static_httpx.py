@@ -64,6 +64,8 @@ async def _run_async(url: str, context: EngineContext) -> EngineResult:
                 chunks = []
                 total = 0
                 async for chunk in resp.aiter_bytes(chunk_size=65536):
+                    if context.cancel_event.is_set():
+                        raise asyncio.CancelledError("Job cancelled during stream download")
                     total += len(chunk)
                     if total > MAX_CONTENT_LENGTH:
                         raise ValueError(f"Response exceeds {MAX_CONTENT_LENGTH} bytes — aborted")
